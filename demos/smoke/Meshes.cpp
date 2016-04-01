@@ -114,7 +114,7 @@ public:
             faces_.emplace_back(Face{ f[0], f[1], f[2] });
     }
 
-    uint32_t vertex_count() const
+    size_t vertex_count() const
     {
         return static_cast<uint32_t>(positions_.size());
     }
@@ -140,7 +140,7 @@ public:
         }
     }
 
-    uint32_t index_count() const
+    size_t index_count() const
     {
         return static_cast<uint32_t>(faces_.size()) * 3;
     }
@@ -318,7 +318,7 @@ private:
         mesh_.positions_.emplace_back(pos_mid);
         mesh_.normals_.emplace_back(normal_mid);
 
-        int mid = mesh_.vertex_count() - 1;
+        int mid = (int)mesh_.vertex_count() - 1;
         middle_points_.emplace(std::make_pair(key, mid));
 
         return mid;
@@ -440,7 +440,7 @@ Meshes::Meshes(VkDevice dev, const std::vector<VkMemoryPropertyFlags> &mem_flags
     VkDeviceSize ib_size = 0;
     for (const auto &mesh : meshes) {
         VkDrawIndexedIndirectCommand draw = {};
-        draw.indexCount = mesh.index_count();
+        draw.indexCount = (uint32_t)mesh.index_count();
         draw.instanceCount = 1;
         draw.firstIndex = first_index;
         draw.vertexOffset = vertex_offset;
@@ -448,8 +448,8 @@ Meshes::Meshes(VkDevice dev, const std::vector<VkMemoryPropertyFlags> &mem_flags
 
         draw_commands_.push_back(draw);
 
-        first_index += mesh.index_count();
-        vertex_offset += mesh.vertex_count();
+        first_index += (uint32_t)mesh.index_count();
+        vertex_offset += (uint32_t)mesh.vertex_count();
         vb_size += mesh.vertex_buffer_size();
         ib_size += mesh.index_buffer_size();
     }
