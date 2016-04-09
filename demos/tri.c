@@ -115,42 +115,76 @@ struct texture_object {
 
 static int validation_error = 0;
 
+static void PrintMessage(const char *msg)
+{
+    printf("%s", msg);
+    fflush(stdout);
+#ifdef _WIN32
+    // It's awkward to read stdout in Visual Studio, so duplicate the message
+    // into VS's debug output window
+    OutputDebugStringA(msg);
+#endif
+}
+
+static void PrintfMessage(const char *fmt, ...)
+{
+#define MAX_MESSAGE_SIZE 1024
+    char buf[MAX_MESSAGE_SIZE];
+
+    va_list ap;
+    va_start(ap, fmt);
+#ifdef _WIN32
+    _vsnprintf(buf, MAX_MESSAGE_SIZE, fmt, ap);
+#else
+    vsnprintf(buf, MAX_MESSAGE_SIZE, fmt, ap);
+#endif
+    buf[MAX_MESSAGE_SIZE - 1] = '\0';
+    va_end(ap);
+    PrintMessage(buf);
+#undef MAX_MESSAGE_SIZE
+}
+
 VKAPI_ATTR VkBool32 VKAPI_CALL
-dbgFunc(VkFlags msgFlags, VkDebugReportObjectTypeEXT objType,
-        uint64_t srcObject, size_t location, int32_t msgCode,
-        const char *pLayerPrefix, const char *pMsg, void *pUserData) {
-    char *message = (char *)malloc(strlen(pMsg) + 100);
+dbgFunc(
+    VkDebugReportFlagsEXT flags,
+    VkDebugReportObjectTypeEXT objectType,
+    uint64_t object,
+    size_t location,
+    int32_t messageCode,
+    const char *pLayerPrefix,
+    const char *pMessage,
+    void *pUserData)
+{
+    const char *severity;
+    // Multiple bits might be set, so pick the most severe one
+    if (flags & VK_DEBUG_REPORT_ERROR_BIT_EXT)
+        severity = "ERROR";
+    else if (flags & VK_DEBUG_REPORT_WARNING_BIT_EXT)
+        severity = "WARN";
+    else if (flags & VK_DEBUG_REPORT_PERFORMANCE_WARNING_BIT_EXT)
+        severity = "PERF";
+    else if (flags & VK_DEBUG_REPORT_INFORMATION_BIT_EXT)
+        severity = "INFO";
+    else if (flags & VK_DEBUG_REPORT_DEBUG_BIT_EXT)
+        severity = "DBUG"; // intentional misspelling to make the widths prettier
+    else
+        severity = "???";
 
-    assert(message);
-
-    validation_error = 1;
-
-    if (msgFlags & VK_DEBUG_REPORT_ERROR_BIT_EXT) {
-        sprintf(message, "ERROR: [%s] Code %d : %s", pLayerPrefix, msgCode,
-                pMsg);
-    } else if (msgFlags & VK_DEBUG_REPORT_WARNING_BIT_EXT) {
-        sprintf(message, "WARNING: [%s] Code %d : %s", pLayerPrefix, msgCode,
-                pMsg);
-    } else {
-        return false;
-    }
+    if (1)
+        PrintfMessage("[%s][CALLBACK] %s: %s [flags=0x%x objectType=%d object=0x%llx location=%d messageCode=%d pUserData=%p]\n",
+            severity, pLayerPrefix, pMessage, flags, objectType, (unsigned long long)object, location, messageCode, pUserData);
+    else
+        PrintfMessage("[%s][CALLBACK] %s: %s\n", severity, pLayerPrefix, pMessage);
 
 #ifdef _WIN32
-    MessageBox(NULL, message, "Alert", MB_OK);
-#else
-    printf("%s\n", message);
-    fflush(stdout);
+    if (flags & VK_DEBUG_REPORT_ERROR_BIT_EXT)
+    {
+        if (IsDebuggerPresent())
+            DebugBreak();
+    }
 #endif
-    free(message);
 
-    /*
-     * false indicates that layer should not bail-out of an
-     * API call that had validation failures. This may mean that the
-     * app dies inside the driver due to invalid parameter(s).
-     * That's what would happen without validation layers, so we'll
-     * keep that behavior here.
-     */
-    return false;
+    return VK_FALSE;
 }
 
 VKAPI_ATTR VkBool32 VKAPI_CALL
@@ -1534,6 +1568,12 @@ static void demo_run(struct demo *demo) {
     demo->depthStencil += demo->depthIncrement;
 
     demo->curFrame++;
+//     if (demo->curFrame % 1000 == 0)
+//     {
+//         char buf[256];
+//         sprintf(buf, "%d: Frame %d\n", GetTickCount(), demo->curFrame);
+//         OutputDebugStringA(buf);
+//     }
     if (demo->frameCount != INT32_MAX && demo->curFrame == demo->frameCount) {
         PostQuitMessage(validation_error);
     }
@@ -2055,6 +2095,8 @@ static void demo_init_vk(struct demo *demo) {
         dbgCreateInfo.sType = VK_STRUCTURE_TYPE_DEBUG_REPORT_CREATE_INFO_EXT;
         dbgCreateInfo.flags =
             VK_DEBUG_REPORT_ERROR_BIT_EXT | VK_DEBUG_REPORT_WARNING_BIT_EXT;
+        dbgCreateInfo.flags |=
+            VK_DEBUG_REPORT_INFORMATION_BIT_EXT | VK_DEBUG_REPORT_DEBUG_BIT_EXT | VK_DEBUG_REPORT_PERFORMANCE_WARNING_BIT_EXT;
         dbgCreateInfo.pfnCallback = demo->use_break ? BreakCallback : dbgFunc;
         dbgCreateInfo.pUserData = NULL;
         dbgCreateInfo.pNext = NULL;
