@@ -1793,7 +1793,8 @@ static void demo_init_vk(struct demo *demo) {
     demo->enabled_layer_count = 0;
 
     char *instance_validation_layers_alt1[] = {
-        "VK_LAYER_LUNARG_standard_validation"
+        "VK_LAYER_XXX_sync"
+        //"VK_LAYER_LUNARG_standard_validation"
     };
 
     char *instance_validation_layers_alt2[] = {
@@ -1825,7 +1826,8 @@ static void demo_init_vk(struct demo *demo) {
                     instance_layers);
             if (validation_found) {
                 demo->enabled_layer_count = ARRAY_SIZE(instance_validation_layers_alt1);
-                demo->device_validation_layers[0] = "VK_LAYER_LUNARG_standard_validation";
+                //demo->device_validation_layers[0] = "VK_LAYER_LUNARG_standard_validation";
+                demo->device_validation_layers[0] = "VK_LAYER_XXX_sync";
                 device_validation_layer_count = 1;
             } else {
                 // use alternative set of validation layers
@@ -1941,9 +1943,20 @@ static void demo_init_vk(struct demo *demo) {
         .engineVersion = 0,
         .apiVersion = VK_API_VERSION_1_0,
     };
+
+    VkDebugReportCallbackCreateInfoEXT inst_dbgCreateInfo;
+    inst_dbgCreateInfo.sType = VK_STRUCTURE_TYPE_DEBUG_REPORT_CREATE_INFO_EXT;
+    inst_dbgCreateInfo.flags =
+        VK_DEBUG_REPORT_ERROR_BIT_EXT | VK_DEBUG_REPORT_WARNING_BIT_EXT;
+    inst_dbgCreateInfo.flags |=
+        VK_DEBUG_REPORT_INFORMATION_BIT_EXT | VK_DEBUG_REPORT_DEBUG_BIT_EXT | VK_DEBUG_REPORT_PERFORMANCE_WARNING_BIT_EXT;
+    inst_dbgCreateInfo.pfnCallback = demo->use_break ? BreakCallback : dbgFunc;
+    inst_dbgCreateInfo.pUserData = NULL;
+    inst_dbgCreateInfo.pNext = NULL;
+    
     VkInstanceCreateInfo inst_info = {
         .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
-        .pNext = NULL,
+        .pNext = &inst_dbgCreateInfo,
         .pApplicationInfo = &app,
         .enabledLayerCount = demo->enabled_layer_count,
         .ppEnabledLayerNames = (const char *const *)instance_validation_layers,

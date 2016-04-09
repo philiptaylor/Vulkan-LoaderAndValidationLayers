@@ -28,8 +28,6 @@
 #include "vulkan/vk_layer.h"
 #include <vector>
 
-using namespace std;
-
 // Device Limits ERROR codes
 typedef enum _DEV_LIMITS_ERROR {
     DEVLIMITS_NONE,                          // Used for INFO & other non-error messages
