@@ -1,6 +1,4 @@
-/* Copyright (c) 2015-2016 The Khronos Group Inc.
- * Copyright (c) 2015-2016 Valve Corporation
- * Copyright (c) 2015-2016 LunarG, Inc.
+/* Copyright (c) 2016 Philip Taylor
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and/or associated documentation files (the "Materials"), to
@@ -20,16 +18,9 @@
  * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
  * OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE MATERIALS OR THE
  * USE OR OTHER DEALINGS IN THE MATERIALS
- *
- * Author: Tobin Ehlis <tobin@lunarg.com>
- * Author: Mark Lobodzinski <mark@lunarg.com>
  */
 
-#include "vulkan/vk_layer.h"
-#include <vector>
-
-// Device Limits ERROR codes
-typedef enum _DEV_LIMITS_ERROR {
+typedef enum _SYNC_ERROR {
     DEVLIMITS_NONE,                          // Used for INFO & other non-error messages
     DEVLIMITS_INVALID_INSTANCE,              // Invalid instance used
     DEVLIMITS_INVALID_PHYSICAL_DEVICE,       // Invalid physical device used
@@ -43,33 +34,4 @@ typedef enum _DEV_LIMITS_ERROR {
     DEVLIMITS_INVALID_UNIFORM_BUFFER_OFFSET, // Uniform buffer offset violates device limit granularity
     DEVLIMITS_INVALID_STORAGE_BUFFER_OFFSET, // Storage buffer offset violates device limit granularity
     DEVLIMITS_INVALID_BUFFER_UPDATE_ALIGNMENT,  // Alignment requirement for buffer update is violated
-} DEV_LIMITS_ERROR;
-
-typedef enum _CALL_STATE {
-    UNCALLED,      // Function has not been called
-    QUERY_COUNT,   // Function called once to query a count
-    QUERY_DETAILS, // Function called w/ a count to query details
-} CALL_STATE;
-
-typedef struct _INSTANCE_STATE {
-    // Track the call state and array size for physical devices
-    CALL_STATE vkEnumeratePhysicalDevicesState;
-    uint32_t physicalDevicesCount;
-    _INSTANCE_STATE() : vkEnumeratePhysicalDevicesState(UNCALLED), physicalDevicesCount(0){};
-} INSTANCE_STATE;
-
-typedef struct _PHYSICAL_DEVICE_STATE {
-    // Track the call state and array sizes for various query functions
-    CALL_STATE vkGetPhysicalDeviceQueueFamilyPropertiesState;
-    uint32_t queueFamilyPropertiesCount;
-    CALL_STATE vkGetPhysicalDeviceLayerPropertiesState;
-    uint32_t deviceLayerCount;
-    CALL_STATE vkGetPhysicalDeviceExtensionPropertiesState;
-    uint32_t deviceExtensionCount;
-    CALL_STATE vkGetPhysicalDeviceFeaturesState;
-    _PHYSICAL_DEVICE_STATE()
-        : vkGetPhysicalDeviceQueueFamilyPropertiesState(UNCALLED), queueFamilyPropertiesCount(0),
-          vkGetPhysicalDeviceLayerPropertiesState(UNCALLED), deviceLayerCount(0),
-          vkGetPhysicalDeviceExtensionPropertiesState(UNCALLED), deviceExtensionCount(0),
-          vkGetPhysicalDeviceFeaturesState(UNCALLED){};
-} PHYSICAL_DEVICE_STATE;
+} SYNC_ERROR;
