@@ -45,20 +45,20 @@ enum class sync_command_buffer_state
     EXECUTABLE,
 };
 
-class command_base
+class sync_cmd_base
 {
 public:
-    virtual ~command_base() { }
+    virtual ~sync_cmd_base() { }
 
     virtual bool is_draw() const { return false; }
 
     virtual void to_string(std::ostream &str) = 0;
 };
 
-class command_draw : public command_base
+class sync_cmd_draw : public sync_cmd_base
 {
 public:
-    command_draw(
+    sync_cmd_draw(
         uint32_t vertexCount,
         uint32_t instanceCount,
         uint32_t firstVertex,
@@ -88,10 +88,10 @@ public:
     uint32_t firstInstance;
 };
 
-class command_draw_indexed : public command_base
+class sync_cmd_draw_indexed : public sync_cmd_base
 {
 public:
-    command_draw_indexed(
+    sync_cmd_draw_indexed(
         uint32_t indexCount,
         uint32_t instanceCount,
         uint32_t firstIndex,
@@ -110,7 +110,11 @@ public:
     virtual void to_string(std::ostream &str)
     {
         str << "vkCmdDrawIndexed {";
-        str << " ...";
+        str << " indexCount=" << indexCount;
+        str << " instanceCount=" << instanceCount;
+        str << " firstIndex=" << firstIndex;
+        str << " vertexOffset=" << vertexOffset;
+        str << " firstInstance=" << firstInstance;
         str << " }";
     }
 
@@ -121,10 +125,10 @@ public:
     uint32_t firstInstance;
 };
 
-class command_pipeline_barrier : public command_base
+class sync_cmd_pipeline_barrier : public sync_cmd_base
 {
 public:
-    command_pipeline_barrier(
+    sync_cmd_pipeline_barrier(
         VkPipelineStageFlags srcStageMask,
         VkPipelineStageFlags dstStageMask,
         VkDependencyFlags dependencyFlags,
@@ -208,6 +212,91 @@ public:
     std::vector<VkImageMemoryBarrier> imageMemoryBarriers;
 };
 
+class sync_cmd_begin_render_pass : public sync_cmd_base
+{
+public:
+    sync_cmd_begin_render_pass(
+        const VkRenderPassBeginInfo *pRenderPassBegin,
+        VkSubpassContents contents) :
+        renderPass(pRenderPassBegin->renderPass),
+        framebuffer(pRenderPassBegin->framebuffer),
+        renderArea(pRenderPassBegin->renderArea),
+        clearValues(pRenderPassBegin->pClearValues, pRenderPassBegin->pClearValues + pRenderPassBegin->clearValueCount),
+        contents(contents)
+    {
+    }
+
+    virtual void to_string(std::ostream &str)
+    {
+        str << "vkCmdBeginRenderPass {";
+        str << " renderPass=" << (void *)renderPass;
+        str << " framebuffer=" << (void *)framebuffer;
+        str << " renderArea={";
+        str << " offset=(" << renderArea.offset.x << ", " << renderArea.offset.y << ")";
+        str << " extent=(" << renderArea.extent.width << ", " << renderArea.extent.height << ")";
+        str << " }";
+
+        str << " clearValues=[";
+        for (auto &v : clearValues)
+        {
+            // Correct interpretation depends on attachment type, which we
+            // don't know here, so just print all possibilities
+            str << " {";
+            str << " (" << v.color.float32[0] << ", " << v.color.float32[1] << ", " << v.color.float32[2] << ", " << v.color.float32[3] << ")";
+            str << " |";
+            str << " (" << v.color.int32[0] << ", " << v.color.int32[1] << ", " << v.color.int32[2] << ", " << v.color.int32[3] << ")";
+            str << " |";
+            str << " (" << v.color.uint32[0] << ", " << v.color.uint32[1] << ", " << v.color.uint32[2] << ", " << v.color.uint32[3] << ")";
+            str << " |";
+            str << " (" << v.depthStencil.depth << ", " << v.depthStencil.stencil << ")";
+            str << " }";
+        }
+        str << " ]";
+
+        str << " contents=" << contents;
+        str << " }";
+    }
+
+    VkRenderPass renderPass;
+    VkFramebuffer framebuffer;
+    VkRect2D renderArea;
+    std::vector<VkClearValue> clearValues;
+    VkSubpassContents contents;
+};
+
+class sync_cmd_next_subpass : public sync_cmd_base
+{
+public:
+    sync_cmd_next_subpass(VkSubpassContents contents) :
+        contents(contents)
+    {
+    }
+
+    virtual void to_string(std::ostream &str)
+    {
+        str << "vkCmdNextSubpass {";
+        str << " contents=" << contents;
+        str << " }";
+    }
+
+    VkSubpassContents contents;
+};
+
+class sync_cmd_end_render_pass : public sync_cmd_base
+{
+public:
+    sync_cmd_end_render_pass()
+    {
+    }
+
+    virtual void to_string(std::ostream &str)
+    {
+        str << "vkCmdEndRenderPass {";
+        str << " }";
+    }
+};
+
+
 /**
  * Internal state for a VkCommandBuffer.
  */
@@ -238,7 +327,7 @@ struct sync_command_buffer
     VkQueryControlFlags queryFlags;
     VkQueryPipelineStatisticFlags pipelineStatistics;
 
-    std::vector<std::unique_ptr<command_base>> commands;
+    std::vector<std::unique_ptr<sync_cmd_base>> commands;
 };
 
 /**

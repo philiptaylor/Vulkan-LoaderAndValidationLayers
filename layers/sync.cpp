@@ -743,7 +743,7 @@ LAYER_FN(void) vkCmdDraw(
     if (!buf)
         return;
 
-    buf->commands.emplace_back(new command_draw(vertexCount, instanceCount, firstVertex, firstInstance));
+    buf->commands.emplace_back(new sync_cmd_draw(vertexCount, instanceCount, firstVertex, firstInstance));
 
     device_data->dispatch.CmdDraw(commandBuffer, vertexCount, instanceCount, firstVertex, firstInstance);
 }
@@ -762,9 +762,9 @@ LAYER_FN(void) vkCmdDrawIndexed(
     if (!buf)
         return;
 
-    buf->commands.emplace_back(new command_draw_indexed(indexCount, instanceCount, firstIndex, vertexOffset, firstInstance));
+    buf->commands.emplace_back(new sync_cmd_draw_indexed(indexCount, instanceCount, firstIndex, vertexOffset, firstInstance));
 
-    return device_data->dispatch.CmdDrawIndexed(commandBuffer, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
+    device_data->dispatch.CmdDrawIndexed(commandBuffer, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
 }
 
 LAYER_FN(void) vkCmdPipelineBarrier(
@@ -785,13 +785,13 @@ LAYER_FN(void) vkCmdPipelineBarrier(
     if (!buf)
         return;
 
-    buf->commands.emplace_back(new command_pipeline_barrier(
+    buf->commands.emplace_back(new sync_cmd_pipeline_barrier(
         srcStageMask, dstStageMask, dependencyFlags,
         memoryBarrierCount, pMemoryBarriers,
         bufferMemoryBarrierCount, pBufferMemoryBarriers,
         imageMemoryBarrierCount, pImageMemoryBarriers));
 
-    return device_data->dispatch.CmdPipelineBarrier(commandBuffer,
+    device_data->dispatch.CmdPipelineBarrier(commandBuffer,
         srcStageMask, dstStageMask, dependencyFlags,
         memoryBarrierCount, pMemoryBarriers,
         bufferMemoryBarrierCount, pBufferMemoryBarriers,
@@ -805,10 +805,13 @@ LAYER_FN(void) vkCmdBeginRenderPass(
 {
     auto device_data = get_layer_device_data(commandBuffer);
 
-    if (LOG_DEBUG(device_data, COMMAND_BUFFER, commandBuffer, SYNC_MSG_NONE, __FUNCTION__))
+    sync_command_buffer *buf = get_sync_command_buffer(commandBuffer, __func__);
+    if (!buf)
         return;
 
-    return device_data->dispatch.CmdBeginRenderPass(commandBuffer, pRenderPassBegin, contents);
+    buf->commands.emplace_back(new sync_cmd_begin_render_pass(pRenderPassBegin, contents));
+
+    device_data->dispatch.CmdBeginRenderPass(commandBuffer, pRenderPassBegin, contents);
 }
 
 LAYER_FN(void) vkCmdNextSubpass(
@@ -817,10 +820,13 @@ LAYER_FN(void) vkCmdNextSubpass(
 {
     auto device_data = get_layer_device_data(commandBuffer);
 
-    if (LOG_DEBUG(device_data, COMMAND_BUFFER, commandBuffer, SYNC_MSG_NONE, __FUNCTION__))
+    sync_command_buffer *buf = get_sync_command_buffer(commandBuffer, __func__);
+    if (!buf)
         return;
 
-    return device_data->dispatch.CmdNextSubpass(commandBuffer, contents);
+    buf->commands.emplace_back(new sync_cmd_next_subpass(contents));
+
+    device_data->dispatch.CmdNextSubpass(commandBuffer, contents);
 }
 
 LAYER_FN(void) vkCmdEndRenderPass(
@@ -828,10 +834,13 @@ LAYER_FN(void) vkCmdEndRenderPass(
 {
     auto device_data = get_layer_device_data(commandBuffer);
 
-    if (LOG_DEBUG(device_data, COMMAND_BUFFER, commandBuffer, SYNC_MSG_NONE, __FUNCTION__))
+    sync_command_buffer *buf = get_sync_command_buffer(commandBuffer, __func__);
+    if (!buf)
         return;
 
-    return device_data->dispatch.CmdEndRenderPass(commandBuffer);
+    buf->commands.emplace_back(new sync_cmd_end_render_pass());
+
+    device_data->dispatch.CmdEndRenderPass(commandBuffer);
 }
 
 LAYER_FN(PFN_vkVoidFunction) vkGetDeviceProcAddr(VkDevice device, const char *funcName)
