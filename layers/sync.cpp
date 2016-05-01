@@ -39,6 +39,7 @@
 
 #include <unordered_map>
 #include <mutex>
+#include <sstream>
 
 #include "sync.h"
 
@@ -130,17 +131,41 @@ static layer_device_data *get_layer_device_data(VkCommandBuffer commandBuffer)
 }
 
 
+static sync_command_buffer *get_sync_command_buffer(VkCommandBuffer commandBuffer, const char *func)
+{
+    auto device_data = get_layer_device_data(commandBuffer);
+
+    if (LOG_DEBUG(device_data, COMMAND_BUFFER, commandBuffer, SYNC_MSG_NONE, func))
+        return nullptr;
+
+    std::lock_guard<std::mutex> lock(device_data->sync_mutex);
+
+    auto it = device_data->sync.command_buffers.find(commandBuffer);
+    if (it == device_data->sync.command_buffers.end())
+    {
+        if (LOG_ERROR(device_data, COMMAND_BUFFER, commandBuffer, SYNC_MSG_INVALID_PARAM,
+                "%s called with unknown commandBuffer", func))
+            return nullptr;
+    }
+
+    return &it->second;
+}
+
 static const VkExtensionProperties instance_extensions[] = {{VK_EXT_DEBUG_REPORT_EXTENSION_NAME, VK_EXT_DEBUG_REPORT_SPEC_VERSION}};
 
 LAYER_FN(VkResult) vkEnumerateInstanceExtensionProperties(
-    const char *pLayerName, uint32_t *pCount, VkExtensionProperties *pProperties)
+    const char *pLayerName,
+    uint32_t *pCount,
+    VkExtensionProperties *pProperties)
 {
     return util_GetExtensionProperties(1, instance_extensions, pCount, pProperties);
 }
 
 LAYER_FN(VkResult) vkEnumerateDeviceExtensionProperties(
     VkPhysicalDevice physicalDevice,
-    const char *pLayerName, uint32_t *pCount, VkExtensionProperties *pProperties)
+    const char *pLayerName,
+    uint32_t *pCount,
+    VkExtensionProperties *pProperties)
 {
     // TODO: why's it written this way?
 
@@ -163,7 +188,9 @@ LAYER_FN(VkResult) vkEnumerateInstanceLayerProperties(
 }
 
 LAYER_FN(VkResult) vkEnumerateDeviceLayerProperties(
-    VkPhysicalDevice physicalDevice, uint32_t *pCount, VkLayerProperties *pProperties)
+    VkPhysicalDevice physicalDevice,
+    uint32_t *pCount,
+    VkLayerProperties *pProperties)
 {
     return util_GetLayerProperties(ARRAY_SIZE(global_layers), global_layers, pCount, pProperties);
 }
@@ -211,7 +238,8 @@ LAYER_FN(VkResult) vkCreateInstance(
 }
 
 LAYER_FN(void) vkDestroyInstance(
-    VkInstance instance, const VkAllocationCallbacks *pAllocator)
+    VkInstance instance,
+    const VkAllocationCallbacks *pAllocator)
 {
     layer_instance_data *instance_data = get_layer_instance_data(instance);
     instance_data->dispatch.DestroyInstance(instance, pAllocator);
@@ -275,7 +303,9 @@ LAYER_FN(VkResult) vkCreateDevice(
     return result;
 }
 
-LAYER_FN(void) vkDestroyDevice(VkDevice device, const VkAllocationCallbacks *pAllocator)
+LAYER_FN(void) vkDestroyDevice(
+    VkDevice device,
+    const VkAllocationCallbacks *pAllocator)
 {
     auto device_data = get_layer_device_data(device);
     device_data->dispatch.DestroyDevice(device, pAllocator);
@@ -291,7 +321,8 @@ LAYER_FN(void) vkDestroyDevice(VkDevice device, const VkAllocationCallbacks *pAl
 LAYER_FN(VkResult) vkCreateDebugReportCallbackEXT(
     VkInstance instance,
     const VkDebugReportCallbackCreateInfoEXT *pCreateInfo,
-    const VkAllocationCallbacks *pAllocator, VkDebugReportCallbackEXT *pMsgCallback)
+    const VkAllocationCallbacks *pAllocator,
+    VkDebugReportCallbackEXT *pMsgCallback)
 {
     auto instance_data = get_layer_instance_data(instance);
 
@@ -316,8 +347,13 @@ LAYER_FN(void) vkDestroyDebugReportCallbackEXT(
 
 LAYER_FN(void) vkDebugReportMessageEXT(
     VkInstance instance,
-    VkDebugReportFlagsEXT flags, VkDebugReportObjectTypeEXT objType, uint64_t object,
-    size_t location, int32_t msgCode, const char *pLayerPrefix, const char *pMsg)
+    VkDebugReportFlagsEXT flags,
+    VkDebugReportObjectTypeEXT objType,
+    uint64_t object,
+    size_t location,
+    int32_t msgCode,
+    const char *pLayerPrefix,
+    const char *pMsg)
 {
     auto instance_data = get_layer_instance_data(instance);
     instance_data->dispatch.DebugReportMessageEXT(instance, flags, objType, object, location, msgCode, pLayerPrefix, pMsg);
@@ -336,7 +372,8 @@ LAYER_FN(VkResult) vkQueueSubmit(
     auto device_data = get_layer_device_data(queue);
     bool skipCall = false;
 
-    skipCall |= LOG_DEBUG(device_data, QUEUE, queue, SYNC_MSG_NONE, __FUNCTION__);
+    if (LOG_DEBUG(device_data, QUEUE, queue, SYNC_MSG_NONE, __FUNCTION__))
+        return VK_ERROR_VALIDATION_FAILED_EXT;
 
     {
         std::lock_guard<std::mutex> lock(device_data->sync_mutex);
@@ -356,7 +393,17 @@ LAYER_FN(VkResult) vkQueueSubmit(
                     continue;
                 }
 
-                // TODO: do something with this
+                sync_command_buffer &buf = it->second;
+
+                std::stringstream str;
+                for (auto &cmd : buf.commands)
+                {
+                    str << "    ";
+                    cmd->to_string(str);
+                    str << "\n";
+                }
+                skipCall |= LOG_INFO(device_data, COMMAND_BUFFER, command_buffer, SYNC_MSG_NONE,
+                    "Command buffer contents:\n%s", str.str().c_str());
             }
         }
     }
@@ -385,11 +432,8 @@ LAYER_FN(VkResult) vkCreateCommandPool(
     VkCommandPool *pCommandPool)
 {
     auto device_data = get_layer_device_data(device);
-    bool skipCall = false;
 
-    skipCall |= LOG_DEBUG(device_data, DEVICE, device, SYNC_MSG_NONE, __FUNCTION__);
-
-    if (skipCall)
+    if (LOG_DEBUG(device_data, DEVICE, device, SYNC_MSG_NONE, __FUNCTION__))
         return VK_ERROR_VALIDATION_FAILED_EXT;
 
     VkResult result = device_data->dispatch.CreateCommandPool(device, pCreateInfo, pAllocator, pCommandPool);
@@ -406,7 +450,13 @@ LAYER_FN(VkResult) vkCreateCommandPool(
             *pCommandPool,
             command_pool
         )).second;
-        assert(inserted);
+
+        if (!inserted)
+        {
+            if (LOG_ERROR(device_data, COMMAND_POOL, *pCommandPool, SYNC_MSG_INTERNAL_ERROR,
+                    "Internal error in vkCreateCommandPool: new pool already exists"))
+                return VK_ERROR_VALIDATION_FAILED_EXT;
+        }
     }
 
     return result;
@@ -418,9 +468,9 @@ LAYER_FN(void) vkDestroyCommandPool(
     const VkAllocationCallbacks *pAllocator)
 {
     auto device_data = get_layer_device_data(device);
-    bool skipCall = false;
 
-    skipCall |= LOG_DEBUG(device_data, COMMAND_POOL, commandPool, SYNC_MSG_NONE, __FUNCTION__);
+    if (LOG_DEBUG(device_data, COMMAND_POOL, commandPool, SYNC_MSG_NONE, __FUNCTION__))
+        return;
 
     {
         std::lock_guard<std::mutex> lock(device_data->sync_mutex);
@@ -428,24 +478,26 @@ LAYER_FN(void) vkDestroyCommandPool(
         auto it = device_data->sync.command_pools.find(commandPool);
         if (it == device_data->sync.command_pools.end())
         {
-            skipCall |= LOG_ERROR(device_data, COMMAND_POOL, commandPool, SYNC_MSG_INVALID_PARAM,
-                "vkDestroyCommandPool called with unknown commandPool");
+            if (LOG_ERROR(device_data, COMMAND_POOL, commandPool, SYNC_MSG_INVALID_PARAM,
+                "vkDestroyCommandPool called with unknown commandPool"))
+                return;
+
         }
         else
         {
+            // Remove the device's state for all the buffers in this pool
             for (auto command_buffer : it->second.command_buffers)
             {
                 size_t removed = device_data->sync.command_buffers.erase(command_buffer);
                 assert(removed == 1);
             }
-            it->second.command_buffers.clear();
+
+            // Remove the device's state for this pool
+            device_data->sync.command_pools.erase(it);
         }
     }
 
-    if (skipCall)
-        return;
-
-    return device_data->dispatch.DestroyCommandPool(device, commandPool, pAllocator);
+    device_data->dispatch.DestroyCommandPool(device, commandPool, pAllocator);
 }
 
 LAYER_FN(VkResult) vkResetCommandPool(
@@ -454,32 +506,31 @@ LAYER_FN(VkResult) vkResetCommandPool(
     VkCommandPoolResetFlags flags)
 {
     auto device_data = get_layer_device_data(device);
-    bool skipCall = false;
 
-    skipCall |= LOG_DEBUG(device_data, COMMAND_POOL, commandPool, SYNC_MSG_NONE, __FUNCTION__);
+    if (LOG_DEBUG(device_data, COMMAND_POOL, commandPool, SYNC_MSG_NONE, __FUNCTION__))
+        return VK_ERROR_VALIDATION_FAILED_EXT;
 
     {
         std::lock_guard<std::mutex> lock(device_data->sync_mutex);
+
         auto it = device_data->sync.command_pools.find(commandPool);
         if (it == device_data->sync.command_pools.end())
         {
-            skipCall |= LOG_ERROR(device_data, COMMAND_POOL, commandPool, SYNC_MSG_INVALID_PARAM,
-                "vkResetCommandPool called with unknown commandPool");
+            if (LOG_ERROR(device_data, COMMAND_POOL, commandPool, SYNC_MSG_INVALID_PARAM,
+                    "vkResetCommandPool called with unknown commandPool"))
+                return VK_ERROR_VALIDATION_FAILED_EXT;
         }
         else
         {
             for (auto command_buffer : it->second.command_buffers)
             {
                 auto it2 = device_data->sync.command_buffers.find(command_buffer);
-                assert(it2 == device_data->sync.command_buffers.end());
+                assert(it2 != device_data->sync.command_buffers.end());
 
-                // TODO: mark buffer as back in initial state
+                it2->second.reset();
             }
         }
     }
-
-    if (skipCall)
-        return VK_ERROR_VALIDATION_FAILED_EXT;
 
     return device_data->dispatch.ResetCommandPool(device, commandPool, flags);
 }
@@ -490,11 +541,8 @@ LAYER_FN(VkResult) vkAllocateCommandBuffers(
     VkCommandBuffer *pCommandBuffers)
 {
     auto device_data = get_layer_device_data(device);
-    bool skipCall = false;
 
-    skipCall |= LOG_DEBUG(device_data, COMMAND_POOL, pAllocateInfo->commandPool, SYNC_MSG_NONE, __FUNCTION__);
-
-    if (skipCall)
+    if (LOG_DEBUG(device_data, COMMAND_POOL, pAllocateInfo->commandPool, SYNC_MSG_NONE, __FUNCTION__))
         return VK_ERROR_VALIDATION_FAILED_EXT;
 
     VkResult result = device_data->dispatch.AllocateCommandBuffers(device, pAllocateInfo, pCommandBuffers);
@@ -503,29 +551,40 @@ LAYER_FN(VkResult) vkAllocateCommandBuffers(
 
     {
         std::lock_guard<std::mutex> lock(device_data->sync_mutex);
+
         auto it = device_data->sync.command_pools.find(pAllocateInfo->commandPool);
         if (it == device_data->sync.command_pools.end())
         {
-            skipCall |= LOG_ERROR(device_data, COMMAND_POOL, pAllocateInfo->commandPool, SYNC_MSG_INVALID_PARAM,
-                "vkAllocateCommandBuffers called with unknown commandPool");
+            if (LOG_ERROR(device_data, COMMAND_POOL, pAllocateInfo->commandPool, SYNC_MSG_INVALID_PARAM,
+                    "vkAllocateCommandBuffers called with unknown commandPool"))
+                return VK_ERROR_VALIDATION_FAILED_EXT;
         }
         else
         {
             for (uint32_t i = 0; i < pAllocateInfo->commandBufferCount; ++i)
             {
                 sync_command_buffer command_buffer;
-                command_buffer.command_pool = pAllocateInfo->commandPool;
+
+                command_buffer.reset();
+
                 command_buffer.command_buffer = pCommandBuffers[i];
+                command_buffer.command_pool = pAllocateInfo->commandPool;
+                command_buffer.level = pAllocateInfo->level;
 
                 bool inserted;
 
-                inserted = it->second.command_buffers.insert(pCommandBuffers[i]).second;
-                assert(inserted);
-
                 inserted = device_data->sync.command_buffers.insert(std::make_pair(
                     pCommandBuffers[i],
-                    command_buffer
+                    std::move(command_buffer)
                 )).second;
+                if (!inserted)
+                {
+                    if (LOG_ERROR(device_data, COMMAND_BUFFER, pCommandBuffers[i], SYNC_MSG_INTERNAL_ERROR,
+                            "Internal error in vkAllocateCommandBuffers: new buffer already exists"))
+                        result = VK_ERROR_VALIDATION_FAILED_EXT;
+                }
+
+                inserted = it->second.command_buffers.insert(pCommandBuffers[i]).second;
                 assert(inserted);
             }
         }
@@ -541,17 +600,19 @@ LAYER_FN(void) vkFreeCommandBuffers(
     const VkCommandBuffer *pCommandBuffers)
 {
     auto device_data = get_layer_device_data(device);
-    bool skipCall = false;
 
-    skipCall |= LOG_DEBUG(device_data, COMMAND_POOL, commandPool, SYNC_MSG_NONE, __FUNCTION__);
+    if (LOG_DEBUG(device_data, COMMAND_POOL, commandPool, SYNC_MSG_NONE, __FUNCTION__))
+        return;
 
     {
         std::lock_guard<std::mutex> lock(device_data->sync_mutex);
+
         auto it = device_data->sync.command_pools.find(commandPool);
         if (it == device_data->sync.command_pools.end())
         {
-            skipCall |= LOG_ERROR(device_data, COMMAND_POOL, commandPool, SYNC_MSG_INVALID_PARAM,
-                "vkFreeCommandBuffers called with unknown commandPool");
+            if (LOG_ERROR(device_data, COMMAND_POOL, commandPool, SYNC_MSG_INVALID_PARAM,
+                    "vkFreeCommandBuffers called with unknown commandPool"))
+                return;
         }
         else
         {
@@ -562,8 +623,9 @@ LAYER_FN(void) vkFreeCommandBuffers(
                 removed = it->second.command_buffers.erase(pCommandBuffers[i]);
                 if (removed != 1)
                 {
-                    skipCall |= LOG_ERROR(device_data, COMMAND_BUFFER, pCommandBuffers[i], SYNC_MSG_INVALID_PARAM,
-                        "vkFreeCommandBuffers called with unknown pCommandBuffers[%u]", i);
+                    if (LOG_ERROR(device_data, COMMAND_BUFFER, pCommandBuffers[i], SYNC_MSG_INVALID_PARAM,
+                            "vkFreeCommandBuffers called with unknown pCommandBuffers[%u]", i))
+                        return;
                 }
                 else
                 {
@@ -574,9 +636,6 @@ LAYER_FN(void) vkFreeCommandBuffers(
         }
     }
 
-    if (skipCall)
-        return;
-
     return device_data->dispatch.FreeCommandBuffers(device, commandPool, commandBufferCount, pCommandBuffers);
 }
 
@@ -584,13 +643,38 @@ LAYER_FN(VkResult) vkBeginCommandBuffer(
     VkCommandBuffer commandBuffer,
     const VkCommandBufferBeginInfo *pBeginInfo)
 {
-    bool skipCall = false;
     auto device_data = get_layer_device_data(commandBuffer);
 
-    skipCall |= LOG_DEBUG(device_data, COMMAND_BUFFER, commandBuffer, SYNC_MSG_NONE, __FUNCTION__);
-
-    if (skipCall)
+    if (LOG_DEBUG(device_data, COMMAND_BUFFER, commandBuffer, SYNC_MSG_NONE, __FUNCTION__))
         return VK_ERROR_VALIDATION_FAILED_EXT;
+
+    {
+        std::lock_guard<std::mutex> lock(device_data->sync_mutex);
+
+        auto it = device_data->sync.command_buffers.find(commandBuffer);
+        if (it == device_data->sync.command_buffers.end())
+        {
+            if (LOG_ERROR(device_data, COMMAND_BUFFER, commandBuffer, SYNC_MSG_INVALID_PARAM,
+                    "vkBeginCommandBuffer called with unknown commandBuffer"))
+                return VK_ERROR_VALIDATION_FAILED_EXT;
+        }
+
+        sync_command_buffer &buf = it->second;
+
+        buf.reset();
+        buf.state = sync_command_buffer_state::RECORDING;
+        buf.flags = pBeginInfo->flags;
+
+        if (buf.level == VK_COMMAND_BUFFER_LEVEL_SECONDARY)
+        {
+            buf.renderPass = pBeginInfo->pInheritanceInfo->renderPass;
+            buf.subpass = pBeginInfo->pInheritanceInfo->subpass;
+            buf.framebuffer = pBeginInfo->pInheritanceInfo->framebuffer;
+            buf.occlusionQueryEnable = pBeginInfo->pInheritanceInfo->occlusionQueryEnable;
+            buf.queryFlags = pBeginInfo->pInheritanceInfo->queryFlags;
+            buf.pipelineStatistics = pBeginInfo->pInheritanceInfo->pipelineStatistics;
+        }
+    }
 
     return device_data->dispatch.BeginCommandBuffer(commandBuffer, pBeginInfo);
 }
@@ -599,12 +683,23 @@ LAYER_FN(VkResult) vkEndCommandBuffer(
     VkCommandBuffer commandBuffer)
 {
     auto device_data = get_layer_device_data(commandBuffer);
-    bool skipCall = false;
 
-    skipCall |= LOG_DEBUG(device_data, COMMAND_BUFFER, commandBuffer, SYNC_MSG_NONE, __FUNCTION__);
-
-    if (skipCall)
+    if (LOG_DEBUG(device_data, COMMAND_BUFFER, commandBuffer, SYNC_MSG_NONE, __FUNCTION__))
         return VK_ERROR_VALIDATION_FAILED_EXT;
+
+    {
+        std::lock_guard<std::mutex> lock(device_data->sync_mutex);
+
+        auto it = device_data->sync.command_buffers.find(commandBuffer);
+        if (it == device_data->sync.command_buffers.end())
+        {
+            if (LOG_ERROR(device_data, COMMAND_BUFFER, commandBuffer, SYNC_MSG_INVALID_PARAM,
+                    "vkEndCommandBuffer called with unknown commandBuffer"))
+                return VK_ERROR_VALIDATION_FAILED_EXT;
+        }
+
+        it->second.state = sync_command_buffer_state::EXECUTABLE;
+    }
 
     return device_data->dispatch.EndCommandBuffer(commandBuffer);
 }
@@ -614,12 +709,23 @@ LAYER_FN(VkResult) vkResetCommandBuffer(
     VkCommandBufferResetFlags flags)
 {
     auto device_data = get_layer_device_data(commandBuffer);
-    bool skipCall = false;
 
-    skipCall |= LOG_DEBUG(device_data, COMMAND_BUFFER, commandBuffer, SYNC_MSG_NONE, __FUNCTION__);
-
-    if (skipCall)
+    if (LOG_DEBUG(device_data, COMMAND_BUFFER, commandBuffer, SYNC_MSG_NONE, __FUNCTION__))
         return VK_ERROR_VALIDATION_FAILED_EXT;
+
+    {
+        std::lock_guard<std::mutex> lock(device_data->sync_mutex);
+
+        auto it = device_data->sync.command_buffers.find(commandBuffer);
+        if (it == device_data->sync.command_buffers.end())
+        {
+            if (LOG_ERROR(device_data, COMMAND_BUFFER, commandBuffer, SYNC_MSG_INVALID_PARAM,
+                    "vkResetCommandBuffer called with unknown commandBuffer"))
+                return VK_ERROR_VALIDATION_FAILED_EXT;
+        }
+
+        it->second.reset();
+    }
 
     return device_data->dispatch.ResetCommandBuffer(commandBuffer, flags);
 }
@@ -632,14 +738,14 @@ LAYER_FN(void) vkCmdDraw(
     uint32_t firstInstance)
 {
     auto device_data = get_layer_device_data(commandBuffer);
-    bool skipCall = false;
 
-    skipCall |= LOG_DEBUG(device_data, COMMAND_BUFFER, commandBuffer, SYNC_MSG_NONE, __FUNCTION__);
-
-    if (skipCall)
+    sync_command_buffer *buf = get_sync_command_buffer(commandBuffer, __func__);
+    if (!buf)
         return;
 
-    return device_data->dispatch.CmdDraw(commandBuffer, vertexCount, instanceCount, firstVertex, firstInstance);
+    buf->commands.emplace_back(new command_draw(vertexCount, instanceCount, firstVertex, firstInstance));
+
+    device_data->dispatch.CmdDraw(commandBuffer, vertexCount, instanceCount, firstVertex, firstInstance);
 }
 
 LAYER_FN(void) vkCmdDrawIndexed(
@@ -651,12 +757,12 @@ LAYER_FN(void) vkCmdDrawIndexed(
     uint32_t firstInstance)
 {
     auto device_data = get_layer_device_data(commandBuffer);
-    bool skipCall = false;
 
-    skipCall |= LOG_DEBUG(device_data, COMMAND_BUFFER, commandBuffer, SYNC_MSG_NONE, __FUNCTION__);
-
-    if (skipCall)
+    sync_command_buffer *buf = get_sync_command_buffer(commandBuffer, __func__);
+    if (!buf)
         return;
+
+    buf->commands.emplace_back(new command_draw_indexed(indexCount, instanceCount, firstIndex, vertexOffset, firstInstance));
 
     return device_data->dispatch.CmdDrawIndexed(commandBuffer, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
 }
@@ -666,17 +772,24 @@ LAYER_FN(void) vkCmdPipelineBarrier(
     VkPipelineStageFlags srcStageMask,
     VkPipelineStageFlags dstStageMask,
     VkDependencyFlags dependencyFlags,
-    uint32_t memoryBarrierCount, const VkMemoryBarrier *pMemoryBarriers,
-    uint32_t bufferMemoryBarrierCount, const VkBufferMemoryBarrier *pBufferMemoryBarriers,
-    uint32_t imageMemoryBarrierCount, const VkImageMemoryBarrier *pImageMemoryBarriers)
+    uint32_t memoryBarrierCount,
+    const VkMemoryBarrier *pMemoryBarriers,
+    uint32_t bufferMemoryBarrierCount,
+    const VkBufferMemoryBarrier *pBufferMemoryBarriers,
+    uint32_t imageMemoryBarrierCount,
+    const VkImageMemoryBarrier *pImageMemoryBarriers)
 {
     auto device_data = get_layer_device_data(commandBuffer);
-    bool skipCall = false;
 
-    skipCall |= LOG_DEBUG(device_data, COMMAND_BUFFER, commandBuffer, SYNC_MSG_NONE, __FUNCTION__);
-
-    if (skipCall)
+    sync_command_buffer *buf = get_sync_command_buffer(commandBuffer, __func__);
+    if (!buf)
         return;
+
+    buf->commands.emplace_back(new command_pipeline_barrier(
+        srcStageMask, dstStageMask, dependencyFlags,
+        memoryBarrierCount, pMemoryBarriers,
+        bufferMemoryBarrierCount, pBufferMemoryBarriers,
+        imageMemoryBarrierCount, pImageMemoryBarriers));
 
     return device_data->dispatch.CmdPipelineBarrier(commandBuffer,
         srcStageMask, dstStageMask, dependencyFlags,
@@ -691,11 +804,8 @@ LAYER_FN(void) vkCmdBeginRenderPass(
     VkSubpassContents contents)
 {
     auto device_data = get_layer_device_data(commandBuffer);
-    bool skipCall = false;
 
-    skipCall |= LOG_DEBUG(device_data, COMMAND_BUFFER, commandBuffer, SYNC_MSG_NONE, __FUNCTION__);
-
-    if (skipCall)
+    if (LOG_DEBUG(device_data, COMMAND_BUFFER, commandBuffer, SYNC_MSG_NONE, __FUNCTION__))
         return;
 
     return device_data->dispatch.CmdBeginRenderPass(commandBuffer, pRenderPassBegin, contents);
@@ -706,11 +816,8 @@ LAYER_FN(void) vkCmdNextSubpass(
     VkSubpassContents contents)
 {
     auto device_data = get_layer_device_data(commandBuffer);
-    bool skipCall = false;
 
-    skipCall |= LOG_DEBUG(device_data, COMMAND_BUFFER, commandBuffer, SYNC_MSG_NONE, __FUNCTION__);
-
-    if (skipCall)
+    if (LOG_DEBUG(device_data, COMMAND_BUFFER, commandBuffer, SYNC_MSG_NONE, __FUNCTION__))
         return;
 
     return device_data->dispatch.CmdNextSubpass(commandBuffer, contents);
@@ -720,11 +827,8 @@ LAYER_FN(void) vkCmdEndRenderPass(
     VkCommandBuffer commandBuffer)
 {
     auto device_data = get_layer_device_data(commandBuffer);
-    bool skipCall = false;
 
-    skipCall |= LOG_DEBUG(device_data, COMMAND_BUFFER, commandBuffer, SYNC_MSG_NONE, __FUNCTION__);
-
-    if (skipCall)
+    if (LOG_DEBUG(device_data, COMMAND_BUFFER, commandBuffer, SYNC_MSG_NONE, __FUNCTION__))
         return;
 
     return device_data->dispatch.CmdEndRenderPass(commandBuffer);
@@ -839,4 +943,21 @@ LAYER_FN(PFN_vkVoidFunction) vkGetInstanceProcAddr(VkInstance instance, const ch
     if (!instance_data->dispatch.GetInstanceProcAddr)
         return nullptr;
     return instance_data->dispatch.GetInstanceProcAddr(instance, funcName);
+}
+
+
+void sync_command_buffer::reset()
+{
+    state = sync_command_buffer_state::INITIAL;
+
+    flags = 0;
+
+    renderPass = 0;
+    subpass = 0;
+    framebuffer = 0;
+    occlusionQueryEnable = VK_FALSE;
+    queryFlags = 0;
+    pipelineStatistics = 0;
+
+    commands.clear();
 }
