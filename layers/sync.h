@@ -55,6 +55,159 @@ public:
     virtual void to_string(std::ostream &str) = 0;
 };
 
+class sync_cmd_bind_pipeline : public sync_cmd_base
+{
+public:
+    sync_cmd_bind_pipeline(
+        VkPipelineBindPoint pipelineBindPoint,
+        VkPipeline pipeline) :
+        pipelineBindPoint(pipelineBindPoint),
+        pipeline(pipeline)
+    {
+    }
+
+    virtual void to_string(std::ostream &str)
+    {
+        str << "vkCmdBindPipeline {";
+        str << " pipelineBindPoint=" << pipelineBindPoint;
+        str << " pipeline=" << (void *)pipeline;
+        str << " }";
+    }
+
+    VkPipelineBindPoint pipelineBindPoint;
+    VkPipeline pipeline;
+};
+
+class sync_cmd_set_viewport : public sync_cmd_base
+{
+public:
+    sync_cmd_set_viewport(
+        uint32_t firstViewport,
+        uint32_t viewportCount,
+        const VkViewport *pViewports) :
+        firstViewport(firstViewport),
+        viewports(pViewports, pViewports + viewportCount)
+    {
+    }
+
+    virtual void to_string(std::ostream &str)
+    {
+        str << "vkCmdSetViewport {";
+        str << " firstViewport=" << firstViewport;
+
+        str << " viewports=[";
+        for (auto &v : viewports)
+        {
+            str << " {";
+            str << " x=" << v.x;
+            str << " y=" << v.y;
+            str << " width=" << v.width;
+            str << " height=" << v.height;
+            str << " minDepth=" << v.minDepth;
+            str << " maxDepth=" << v.maxDepth;
+            str << " }";
+        }
+        str << " ]";
+
+        str << " }";
+    }
+
+    uint32_t firstViewport;
+    std::vector<VkViewport> viewports;
+};
+
+class sync_cmd_set_scissor : public sync_cmd_base
+{
+public:
+    sync_cmd_set_scissor(
+        uint32_t firstScissor,
+        uint32_t scissorCount,
+        const VkRect2D *pScissors) :
+        firstScissor(firstScissor),
+        scissors(pScissors, pScissors + scissorCount)
+    {
+    }
+
+    virtual void to_string(std::ostream &str)
+    {
+        str << "vkCmdSetScissor {";
+        str << " firstScissor =" << firstScissor;
+
+        str << " scissors=[";
+        for (auto &s : scissors)
+        {
+            str << " {";
+            str << " offset=(" << s.offset.x << ", " << s.offset.y << ")";
+            str << " extent=(" << s.extent.width << ", " << s.extent.height << ")";
+            str << " }";
+        }
+        str << " ]";
+        str << " }";
+    }
+
+    uint32_t firstScissor;
+    std::vector<VkRect2D> scissors;
+};
+
+class sync_cmd_bind_descriptor_sets : public sync_cmd_base
+{
+public:
+    sync_cmd_bind_descriptor_sets(
+        VkPipelineBindPoint pipelineBindPoint,
+        VkPipelineLayout layout,
+        uint32_t firstSet,
+        uint32_t descriptorSetCount,
+        const VkDescriptorSet *pDescriptorSets,
+        uint32_t dynamicOffsetCount,
+        const uint32_t *pDynamicOffsets) :
+        pipelineBindPoint(pipelineBindPoint),
+        layout(layout),
+        firstSet(firstSet),
+        descriptorSets(pDescriptorSets, pDescriptorSets + descriptorSetCount),
+        dynamicOffsets(pDynamicOffsets, pDynamicOffsets + dynamicOffsetCount)
+    {
+    }
+
+    virtual void to_string(std::ostream &str)
+    {
+        str << "vkCmdBindDescriptorSets {";
+        str << " ...";
+        str << " }";
+    }
+
+    VkPipelineBindPoint pipelineBindPoint;
+    VkPipelineLayout layout;
+    uint32_t firstSet;
+    std::vector<VkDescriptorSet> descriptorSets;
+    std::vector<uint32_t> dynamicOffsets;
+};
+
+class sync_cmd_bind_vertex_buffers : public sync_cmd_base
+{
+public:
+    sync_cmd_bind_vertex_buffers(
+        uint32_t firstBinding,
+        uint32_t bindingCount,
+        const VkBuffer *pBuffers,
+        const VkDeviceSize *pOffsets) :
+        firstBinding(firstBinding),
+        buffers(pBuffers, pBuffers + bindingCount),
+        offsets(pOffsets, pOffsets + bindingCount)
+    {
+    }
+
+    virtual void to_string(std::ostream &str)
+    {
+        str << "vkCmdBindVertexBuffers {";
+        str << " ...";
+        str << " }";
+    }
+
+    uint32_t firstBinding;
+    std::vector<VkBuffer> buffers;
+    std::vector<VkDeviceSize> offsets;
+};
+
 class sync_cmd_draw : public sync_cmd_base
 {
 public:
@@ -123,6 +276,38 @@ public:
     uint32_t firstIndex;
     int32_t vertexOffset;
     uint32_t firstInstance;
+};
+
+class sync_cmd_copy_image : public sync_cmd_base
+{
+public:
+    sync_cmd_copy_image(
+        VkImage srcImage,
+        VkImageLayout srcImageLayout,
+        VkImage dstImage,
+        VkImageLayout dstImageLayout,
+        uint32_t regionCount,
+        const VkImageCopy *pRegions) :
+        srcImage(srcImage),
+        srcImageLayout(srcImageLayout),
+        dstImage(dstImage),
+        dstImageLayout(dstImageLayout),
+        regions(pRegions, pRegions + regionCount)
+    {
+    }
+
+    virtual void to_string(std::ostream &str)
+    {
+        str << "vkCmdCopyImage {";
+        str << " ...";
+        str << " }";
+    }
+
+    VkImage srcImage;
+    VkImageLayout srcImageLayout;
+    VkImage dstImage;
+    VkImageLayout dstImageLayout;
+    std::vector<VkImageCopy> regions;
 };
 
 class sync_cmd_pipeline_barrier : public sync_cmd_base
@@ -342,6 +527,30 @@ struct sync_command_pool
 };
 
 /**
+ * Internal state for a VkRenderPass.
+ */
+struct sync_render_pass
+{
+    VkRenderPass render_pass;
+
+    struct subpass_description
+    {
+        VkSubpassDescriptionFlags flags;
+        VkPipelineBindPoint pipelineBindPoint;
+        std::vector<VkAttachmentReference> inputAttachments;
+        std::vector<VkAttachmentReference> colorAttachments;
+        std::vector<VkAttachmentReference> resolveAttachments;
+        std::vector<VkAttachmentReference> depthStencilAttachment;
+        std::vector<uint32_t> preserveAttachments;
+    };
+
+    VkRenderPassCreateFlags flags;
+    std::vector<VkAttachmentDescription> attachments;
+    std::vector<subpass_description> subpasses;
+    std::vector<VkSubpassDependency> dependencies;
+};
+
+/**
  * Internal state for a VkDevice.
  */
 struct sync_device
@@ -355,4 +564,6 @@ struct sync_device
     // This must remain in sync with command_pools[].command_buffers
     // (every command buffer belongs to a single pool)
     std::map<VkCommandBuffer, sync_command_buffer> command_buffers;
+
+    std::map<VkRenderPass, sync_render_pass> render_passes;
 };

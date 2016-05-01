@@ -289,6 +289,13 @@ LAYER_FN(VkResult) vkCreateDevice(
 
     layer_init_device_dispatch_table(*pDevice, &device_data->dispatch, fpGetDeviceProcAddr);
 
+    // layer_init_device_dispatch_table doesn't do extensions, so do those manually
+    device_data->dispatch.CreateSwapchainKHR = (PFN_vkCreateSwapchainKHR)fpGetDeviceProcAddr(*pDevice, "vkCreateSwapchainKHR");
+    device_data->dispatch.DestroySwapchainKHR = (PFN_vkDestroySwapchainKHR)fpGetDeviceProcAddr(*pDevice, "vkDestroySwapchainKHR");
+    device_data->dispatch.GetSwapchainImagesKHR = (PFN_vkGetSwapchainImagesKHR)fpGetDeviceProcAddr(*pDevice, "vkGetSwapchainImagesKHR");
+    device_data->dispatch.AcquireNextImageKHR = (PFN_vkAcquireNextImageKHR)fpGetDeviceProcAddr(*pDevice, "vkAcquireNextImageKHR");
+    device_data->dispatch.QueuePresentKHR = (PFN_vkQueuePresentKHR)fpGetDeviceProcAddr(*pDevice, "vkQueuePresentKHR");
+
     device_data->report_data = layer_debug_report_create_device(instance_data->report_data, *pDevice);
 
     {
@@ -408,21 +415,159 @@ LAYER_FN(VkResult) vkQueueSubmit(
         }
     }
 
-    /*
-     * CreateCommandPool
-     * ResetCommandPool - puts all bufs back in initial state
-     * DestroyCommandPool - frees all bufs
-     * AllocateCommandBuffers
-     * ResetCommandBuffer - puts in initial state
-     * FreeCommandBuffers
-     * BeginCommandBuffer
-     * EndCommandBuffer
-     **/
-
     if (skipCall)
         return VK_ERROR_VALIDATION_FAILED_EXT;
 
     return device_data->dispatch.QueueSubmit(queue, submitCount, pSubmits, fence);
+}
+
+LAYER_FN(VkResult) vkQueueWaitIdle(
+    VkQueue queue)
+{
+    auto device_data = get_layer_device_data(queue);
+
+    if (LOG_DEBUG(device_data, QUEUE, queue, SYNC_MSG_NONE, __FUNCTION__))
+        return VK_ERROR_VALIDATION_FAILED_EXT;
+
+    return device_data->dispatch.QueueWaitIdle(queue);
+}
+
+LAYER_FN(VkResult) vkDeviceWaitIdle(
+    VkDevice device)
+{
+    auto device_data = get_layer_device_data(device);
+
+    if (LOG_DEBUG(device_data, DEVICE, device, SYNC_MSG_NONE, __FUNCTION__))
+        return VK_ERROR_VALIDATION_FAILED_EXT;
+
+    return device_data->dispatch.DeviceWaitIdle(device);
+}
+
+// LAYER_FN(VkResult) vkQueueBindSparse(VkQueue queue, uint32_t bindInfoCount, const VkBindSparseInfo* pBindInfo, VkFence fence);
+// LAYER_FN(VkResult) vkCreateFence(VkDevice device, const VkFenceCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkFence* pFence);
+// LAYER_FN(void) vkDestroyFence(VkDevice device, VkFence fence, const VkAllocationCallbacks* pAllocator);
+// LAYER_FN(VkResult) vkResetFences(VkDevice device, uint32_t fenceCount, const VkFence* pFences);
+// LAYER_FN(VkResult) vkGetFenceStatus(VkDevice device, VkFence fence);
+// LAYER_FN(VkResult) vkWaitForFences(VkDevice device, uint32_t fenceCount, const VkFence* pFences, VkBool32 waitAll, uint64_t timeout);
+
+LAYER_FN(VkResult) vkCreateSemaphore(
+    VkDevice device,
+    const VkSemaphoreCreateInfo *pCreateInfo,
+    const VkAllocationCallbacks *pAllocator,
+    VkSemaphore *pSemaphore)
+{
+    auto device_data = get_layer_device_data(device);
+
+    if (LOG_DEBUG(device_data, DEVICE, device, SYNC_MSG_NONE, __FUNCTION__))
+        return VK_ERROR_VALIDATION_FAILED_EXT;
+
+    return device_data->dispatch.CreateSemaphore(device, pCreateInfo, pAllocator, pSemaphore);
+}
+
+LAYER_FN(void) vkDestroySemaphore(
+    VkDevice device,
+    VkSemaphore semaphore,
+    const VkAllocationCallbacks *pAllocator)
+{
+    auto device_data = get_layer_device_data(device);
+
+    if (LOG_DEBUG(device_data, SEMAPHORE, semaphore, SYNC_MSG_NONE, __FUNCTION__))
+        return;
+
+    return device_data->dispatch.DestroySemaphore(device, semaphore, pAllocator);
+}
+
+// LAYER_FN(VkResult) vkCreateEvent(VkDevice device, const VkEventCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkEvent* pEvent);
+// LAYER_FN(void) vkDestroyEvent)(VkDevice device, VkEvent event, const VkAllocationCallbacks* pAllocator);
+// LAYER_FN(VkResult) vkGetEventStatus(VkDevice device, VkEvent event);
+// LAYER_FN(VkResult) vkSetEvent(VkDevice device, VkEvent event);
+// LAYER_FN(VkResult) vkResetEvent(VkDevice device, VkEvent event);
+
+LAYER_FN(VkResult) vkCreateRenderPass(
+    VkDevice device,
+    const VkRenderPassCreateInfo *pCreateInfo,
+    const VkAllocationCallbacks *pAllocator,
+    VkRenderPass *pRenderPass)
+{
+    auto device_data = get_layer_device_data(device);
+
+    if (LOG_DEBUG(device_data, DEVICE, device, SYNC_MSG_NONE, __FUNCTION__))
+        return VK_ERROR_VALIDATION_FAILED_EXT;
+
+    VkResult result = device_data->dispatch.CreateRenderPass(device, pCreateInfo, pAllocator, pRenderPass);
+    if (result != VK_SUCCESS)
+        return result;
+
+    {
+        std::lock_guard<std::mutex> lock(device_data->sync_mutex);
+
+        sync_render_pass render_pass;
+        render_pass.render_pass = *pRenderPass;
+
+        render_pass.flags = pCreateInfo->flags;
+        render_pass.attachments = std::vector<VkAttachmentDescription>(pCreateInfo->pAttachments, pCreateInfo->pAttachments + pCreateInfo->attachmentCount);
+        for (uint32_t i = 0; i < pCreateInfo->subpassCount; ++i)
+        {
+            sync_render_pass::subpass_description desc;
+            auto &subpass = pCreateInfo->pSubpasses[i];
+
+            desc.flags = subpass.flags;
+            desc.pipelineBindPoint = subpass.pipelineBindPoint;
+            desc.inputAttachments = std::vector<VkAttachmentReference>(subpass.pInputAttachments, subpass.pInputAttachments + subpass.inputAttachmentCount);
+            desc.colorAttachments = std::vector<VkAttachmentReference>(subpass.pColorAttachments, subpass.pColorAttachments + subpass.colorAttachmentCount);
+            if (subpass.pResolveAttachments)
+                desc.resolveAttachments = std::vector<VkAttachmentReference>(subpass.pResolveAttachments, subpass.pResolveAttachments + subpass.colorAttachmentCount);
+            if (subpass.pDepthStencilAttachment)
+                desc.depthStencilAttachment.push_back(*subpass.pDepthStencilAttachment);
+            desc.preserveAttachments = std::vector<uint32_t>(subpass.pPreserveAttachments, subpass.pPreserveAttachments + subpass.preserveAttachmentCount);
+
+            render_pass.subpasses.push_back(std::move(desc));
+        }
+        render_pass.dependencies = std::vector<VkSubpassDependency>(pCreateInfo->pDependencies, pCreateInfo->pDependencies + pCreateInfo->dependencyCount);
+
+        bool inserted = device_data->sync.render_passes.insert(std::make_pair(
+            *pRenderPass,
+            render_pass
+        )).second;
+
+        if (!inserted)
+        {
+            if (LOG_ERROR(device_data, RENDER_PASS, *pRenderPass, SYNC_MSG_INTERNAL_ERROR,
+                    "Internal error in vkCreateRenderPass: new render pass already exists"))
+                return VK_ERROR_VALIDATION_FAILED_EXT;
+        }
+    }
+
+    return result;
+}
+
+LAYER_FN(void) vkDestroyRenderPass(
+    VkDevice device,
+    VkRenderPass renderPass,
+    const VkAllocationCallbacks *pAllocator)
+{
+    auto device_data = get_layer_device_data(device);
+
+    if (LOG_DEBUG(device_data, RENDER_PASS, renderPass, SYNC_MSG_NONE, __FUNCTION__))
+        return;
+
+    {
+        std::lock_guard<std::mutex> lock(device_data->sync_mutex);
+
+        auto it = device_data->sync.render_passes.find(renderPass);
+        if (it == device_data->sync.render_passes.end())
+        {
+            if (LOG_ERROR(device_data, RENDER_PASS, renderPass, SYNC_MSG_INVALID_PARAM,
+                "vkDestroyRenderPass called with unknown renderPass"))
+                return;
+        }
+        else
+        {
+            device_data->sync.render_passes.erase(it);
+        }
+    }
+
+    device_data->dispatch.DestroyRenderPass(device, renderPass, pAllocator);
 }
 
 LAYER_FN(VkResult) vkCreateCommandPool(
@@ -481,7 +626,6 @@ LAYER_FN(void) vkDestroyCommandPool(
             if (LOG_ERROR(device_data, COMMAND_POOL, commandPool, SYNC_MSG_INVALID_PARAM,
                 "vkDestroyCommandPool called with unknown commandPool"))
                 return;
-
         }
         else
         {
@@ -730,6 +874,107 @@ LAYER_FN(VkResult) vkResetCommandBuffer(
     return device_data->dispatch.ResetCommandBuffer(commandBuffer, flags);
 }
 
+
+
+LAYER_FN(void) vkCmdBindPipeline(
+    VkCommandBuffer commandBuffer,
+    VkPipelineBindPoint pipelineBindPoint,
+    VkPipeline pipeline)
+{
+    auto device_data = get_layer_device_data(commandBuffer);
+
+    sync_command_buffer *buf = get_sync_command_buffer(commandBuffer, __func__);
+    if (!buf)
+        return;
+
+    buf->commands.emplace_back(new sync_cmd_bind_pipeline(pipelineBindPoint, pipeline));
+
+    device_data->dispatch.CmdBindPipeline(commandBuffer, pipelineBindPoint, pipeline);
+}
+
+LAYER_FN(void) vkCmdSetViewport(
+    VkCommandBuffer commandBuffer,
+    uint32_t firstViewport,
+    uint32_t viewportCount,
+    const VkViewport *pViewports)
+{
+    auto device_data = get_layer_device_data(commandBuffer);
+
+    sync_command_buffer *buf = get_sync_command_buffer(commandBuffer, __func__);
+    if (!buf)
+        return;
+
+    buf->commands.emplace_back(new sync_cmd_set_viewport(firstViewport, viewportCount, pViewports));
+
+    device_data->dispatch.CmdSetViewport(commandBuffer, firstViewport, viewportCount, pViewports);
+}
+
+LAYER_FN(void) vkCmdSetScissor(
+    VkCommandBuffer commandBuffer,
+    uint32_t firstScissor,
+    uint32_t scissorCount,
+    const VkRect2D *pScissors)
+{
+    auto device_data = get_layer_device_data(commandBuffer);
+
+    sync_command_buffer *buf = get_sync_command_buffer(commandBuffer, __func__);
+    if (!buf)
+        return;
+
+    buf->commands.emplace_back(new sync_cmd_set_scissor(firstScissor, scissorCount, pScissors));
+
+    device_data->dispatch.CmdSetScissor(commandBuffer, firstScissor, scissorCount, pScissors);
+}
+
+// LAYER_FN(void) vkCmdSetLineWidth(VkCommandBuffer commandBuffer, float lineWidth);
+// LAYER_FN(void) vkCmdSetDepthBias(VkCommandBuffer commandBuffer, float depthBiasConstantFactor, float depthBiasClamp, float depthBiasSlopeFactor);
+// LAYER_FN(void) vkCmdSetBlendConstants(VkCommandBuffer commandBuffer, const float blendConstants[4]);
+// LAYER_FN(void) vkCmdSetDepthBounds(VkCommandBuffer commandBuffer, float minDepthBounds, float maxDepthBounds);
+// LAYER_FN(void) vkCmdSetStencilCompareMask(VkCommandBuffer commandBuffer, VkStencilFaceFlags faceMask, uint32_t compareMask);
+// LAYER_FN(void) vkCmdSetStencilWriteMask(VkCommandBuffer commandBuffer, VkStencilFaceFlags faceMask, uint32_t writeMask);
+// LAYER_FN(void) vkCmdSetStencilReference(VkCommandBuffer commandBuffer, VkStencilFaceFlags faceMask, uint32_t reference);
+
+LAYER_FN(void) vkCmdBindDescriptorSets(
+    VkCommandBuffer commandBuffer,
+    VkPipelineBindPoint pipelineBindPoint,
+    VkPipelineLayout layout,
+    uint32_t firstSet,
+    uint32_t descriptorSetCount,
+    const VkDescriptorSet *pDescriptorSets,
+    uint32_t dynamicOffsetCount,
+    const uint32_t *pDynamicOffsets)
+{
+    auto device_data = get_layer_device_data(commandBuffer);
+
+    sync_command_buffer *buf = get_sync_command_buffer(commandBuffer, __func__);
+    if (!buf)
+        return;
+
+    buf->commands.emplace_back(new sync_cmd_bind_descriptor_sets(pipelineBindPoint, layout, firstSet, descriptorSetCount, pDescriptorSets, dynamicOffsetCount, pDynamicOffsets));
+
+    device_data->dispatch.CmdBindDescriptorSets(commandBuffer, pipelineBindPoint, layout, firstSet, descriptorSetCount, pDescriptorSets, dynamicOffsetCount, pDynamicOffsets);
+}
+
+// LAYER_FN(void) vkCmdBindIndexBuffer(VkCommandBuffer commandBuffer, VkBuffer buffer, VkDeviceSize offset, VkIndexType indexType);
+
+LAYER_FN(void) vkCmdBindVertexBuffers(
+    VkCommandBuffer commandBuffer,
+    uint32_t firstBinding,
+    uint32_t bindingCount,
+    const VkBuffer *pBuffers,
+    const VkDeviceSize *pOffsets)
+{
+    auto device_data = get_layer_device_data(commandBuffer);
+
+    sync_command_buffer *buf = get_sync_command_buffer(commandBuffer, __func__);
+    if (!buf)
+        return;
+
+    buf->commands.emplace_back(new sync_cmd_bind_vertex_buffers(firstBinding, bindingCount, pBuffers, pOffsets));
+
+    device_data->dispatch.CmdBindVertexBuffers(commandBuffer, firstBinding, bindingCount, pBuffers, pOffsets);
+}
+
 LAYER_FN(void) vkCmdDraw(
     VkCommandBuffer commandBuffer,
     uint32_t vertexCount,
@@ -767,6 +1012,45 @@ LAYER_FN(void) vkCmdDrawIndexed(
     device_data->dispatch.CmdDrawIndexed(commandBuffer, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
 }
 
+// LAYER_FN(void) vkCmdDrawIndirect(VkCommandBuffer commandBuffer, VkBuffer buffer, VkDeviceSize offset, uint32_t drawCount, uint32_t stride);
+// LAYER_FN(void) vkCmdDrawIndexedIndirect(VkCommandBuffer commandBuffer, VkBuffer buffer, VkDeviceSize offset, uint32_t drawCount, uint32_t stride);
+// LAYER_FN(void) vkCmdDispatch(VkCommandBuffer commandBuffer, uint32_t x, uint32_t y, uint32_t z);
+// LAYER_FN(void) vkCmdDispatchIndirect(VkCommandBuffer commandBuffer, VkBuffer buffer, VkDeviceSize offset);
+// LAYER_FN(void) vkCmdCopyBuffer(VkCommandBuffer commandBuffer, VkBuffer srcBuffer, VkBuffer dstBuffer, uint32_t regionCount, const VkBufferCopy* pRegions);
+
+LAYER_FN(void) vkCmdCopyImage(
+    VkCommandBuffer commandBuffer,
+    VkImage srcImage,
+    VkImageLayout srcImageLayout,
+    VkImage dstImage,
+    VkImageLayout dstImageLayout,
+    uint32_t regionCount,
+    const VkImageCopy *pRegions)
+{
+    auto device_data = get_layer_device_data(commandBuffer);
+
+    sync_command_buffer *buf = get_sync_command_buffer(commandBuffer, __func__);
+    if (!buf)
+        return;
+
+    buf->commands.emplace_back(new sync_cmd_copy_image(srcImage, srcImageLayout, dstImage, dstImageLayout, regionCount, pRegions));
+
+    device_data->dispatch.CmdCopyImage(commandBuffer, srcImage, srcImageLayout, dstImage, dstImageLayout, regionCount, pRegions);
+}
+
+// LAYER_FN(void) vkCmdBlitImage)(VkCommandBuffer commandBuffer, VkImage srcImage, VkImageLayout srcImageLayout, VkImage dstImage, VkImageLayout dstImageLayout, uint32_t regionCount, const VkImageBlit* pRegions, VkFilter filter);
+// LAYER_FN(void) vkCmdCopyBufferToImage)(VkCommandBuffer commandBuffer, VkBuffer srcBuffer, VkImage dstImage, VkImageLayout dstImageLayout, uint32_t regionCount, const VkBufferImageCopy* pRegions);
+// LAYER_FN(void) vkCmdCopyImageToBuffer)(VkCommandBuffer commandBuffer, VkImage srcImage, VkImageLayout srcImageLayout, VkBuffer dstBuffer, uint32_t regionCount, const VkBufferImageCopy* pRegions);
+// LAYER_FN(void) vkCmdUpdateBuffer)(VkCommandBuffer commandBuffer, VkBuffer dstBuffer, VkDeviceSize dstOffset, VkDeviceSize dataSize, const uint32_t* pData);
+// LAYER_FN(void) vkCmdFillBuffer)(VkCommandBuffer commandBuffer, VkBuffer dstBuffer, VkDeviceSize dstOffset, VkDeviceSize size, uint32_t data);
+// LAYER_FN(void) vkCmdClearColorImage)(VkCommandBuffer commandBuffer, VkImage image, VkImageLayout imageLayout, const VkClearColorValue* pColor, uint32_t rangeCount, const VkImageSubresourceRange* pRanges);
+// LAYER_FN(void) vkCmdClearDepthStencilImage)(VkCommandBuffer commandBuffer, VkImage image, VkImageLayout imageLayout, const VkClearDepthStencilValue* pDepthStencil, uint32_t rangeCount, const VkImageSubresourceRange* pRanges);
+// LAYER_FN(void) vkCmdClearAttachments)(VkCommandBuffer commandBuffer, uint32_t attachmentCount, const VkClearAttachment* pAttachments, uint32_t rectCount, const VkClearRect* pRects);
+// LAYER_FN(void) vkCmdResolveImage)(VkCommandBuffer commandBuffer, VkImage srcImage, VkImageLayout srcImageLayout, VkImage dstImage, VkImageLayout dstImageLayout, uint32_t regionCount, const VkImageResolve* pRegions);
+// LAYER_FN(void) vkCmdSetEvent)(VkCommandBuffer commandBuffer, VkEvent event, VkPipelineStageFlags stageMask);
+// LAYER_FN(void) vkCmdResetEvent)(VkCommandBuffer commandBuffer, VkEvent event, VkPipelineStageFlags stageMask);
+// LAYER_FN(void) vkCmdWaitEvents)(VkCommandBuffer commandBuffer, uint32_t eventCount, const VkEvent* pEvents, VkPipelineStageFlags srcStageMask, VkPipelineStageFlags dstStageMask, uint32_t memoryBarrierCount, const VkMemoryBarrier* pMemoryBarriers, uint32_t bufferMemoryBarrierCount, const VkBufferMemoryBarrier* pBufferMemoryBarriers, uint32_t imageMemoryBarrierCount, const VkImageMemoryBarrier* pImageMemoryBarriers);
+
 LAYER_FN(void) vkCmdPipelineBarrier(
     VkCommandBuffer commandBuffer,
     VkPipelineStageFlags srcStageMask,
@@ -797,6 +1081,13 @@ LAYER_FN(void) vkCmdPipelineBarrier(
         bufferMemoryBarrierCount, pBufferMemoryBarriers,
         imageMemoryBarrierCount, pImageMemoryBarriers);
 }
+
+// LAYER_FN(void) vkCmdBeginQuery(VkCommandBuffer commandBuffer, VkQueryPool queryPool, uint32_t query, VkQueryControlFlags flags);
+// LAYER_FN(void) vkCmdEndQuery(VkCommandBuffer commandBuffer, VkQueryPool queryPool, uint32_t query);
+// LAYER_FN(void) vkCmdResetQueryPool(VkCommandBuffer commandBuffer, VkQueryPool queryPool, uint32_t firstQuery, uint32_t queryCount);
+// LAYER_FN(void) vkCmdWriteTimestamp(VkCommandBuffer commandBuffer, VkPipelineStageFlagBits pipelineStage, VkQueryPool queryPool, uint32_t query);
+// LAYER_FN(void) vkCmdCopyQueryPoolResults(VkCommandBuffer commandBuffer, VkQueryPool queryPool, uint32_t firstQuery, uint32_t queryCount, VkBuffer dstBuffer, VkDeviceSize dstOffset, VkDeviceSize stride, VkQueryResultFlags flags);
+// LAYER_FN(void) vkCmdPushConstants(VkCommandBuffer commandBuffer, VkPipelineLayout layout, VkShaderStageFlags stageFlags, uint32_t offset, uint32_t size, const void* pValues);
 
 LAYER_FN(void) vkCmdBeginRenderPass(
     VkCommandBuffer commandBuffer,
@@ -843,6 +1134,39 @@ LAYER_FN(void) vkCmdEndRenderPass(
     device_data->dispatch.CmdEndRenderPass(commandBuffer);
 }
 
+// LAYER_FN(void) vkCmdExecuteCommands(VkCommandBuffer commandBuffer, uint32_t commandBufferCount, const VkCommandBuffer* pCommandBuffers);
+
+LAYER_FN(VkResult) vkAcquireNextImageKHR(
+    VkDevice device,
+    VkSwapchainKHR swapchain,
+    uint64_t timeout,
+    VkSemaphore semaphore,
+    VkFence fence,
+    uint32_t *pImageIndex)
+{
+    auto device_data = get_layer_device_data(device);
+
+    if (LOG_DEBUG(device_data, SWAPCHAIN_KHR, swapchain, SYNC_MSG_NONE, __FUNCTION__))
+        return VK_ERROR_VALIDATION_FAILED_EXT;
+
+    return device_data->dispatch.AcquireNextImageKHR(device, swapchain, timeout, semaphore, fence, pImageIndex);
+}
+
+LAYER_FN(VkResult) vkQueuePresentKHR(
+    VkQueue queue,
+    const VkPresentInfoKHR *pPresentInfo)
+{
+    auto device_data = get_layer_device_data(queue);
+
+    if (LOG_DEBUG(device_data, QUEUE, queue, SYNC_MSG_NONE, __FUNCTION__))
+        return VK_ERROR_VALIDATION_FAILED_EXT;
+
+    return device_data->dispatch.QueuePresentKHR(queue, pPresentInfo);
+}
+
+
+
+
 LAYER_FN(PFN_vkVoidFunction) vkGetDeviceProcAddr(VkDevice device, const char *funcName)
 {
 #define X(name) \
@@ -854,25 +1178,25 @@ LAYER_FN(PFN_vkVoidFunction) vkGetDeviceProcAddr(VkDevice device, const char *fu
     X(vkDestroyDevice);
 
     X(vkQueueSubmit);
-// typedef VkResult (VKAPI_PTR *PFN_vkQueueWaitIdle)(VkQueue queue);
-// typedef VkResult (VKAPI_PTR *PFN_vkDeviceWaitIdle)(VkDevice device);
+    X(vkQueueWaitIdle);
+    X(vkDeviceWaitIdle);
 
-// typedef VkResult (VKAPI_PTR *PFN_vkQueueBindSparse)(VkQueue queue, uint32_t bindInfoCount, const VkBindSparseInfo* pBindInfo, VkFence fence);
-// typedef VkResult (VKAPI_PTR *PFN_vkCreateFence)(VkDevice device, const VkFenceCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkFence* pFence);
-// typedef void (VKAPI_PTR *PFN_vkDestroyFence)(VkDevice device, VkFence fence, const VkAllocationCallbacks* pAllocator);
-// typedef VkResult (VKAPI_PTR *PFN_vkResetFences)(VkDevice device, uint32_t fenceCount, const VkFence* pFences);
-// typedef VkResult (VKAPI_PTR *PFN_vkGetFenceStatus)(VkDevice device, VkFence fence);
-// typedef VkResult (VKAPI_PTR *PFN_vkWaitForFences)(VkDevice device, uint32_t fenceCount, const VkFence* pFences, VkBool32 waitAll, uint64_t timeout);
-// typedef VkResult (VKAPI_PTR *PFN_vkCreateSemaphore)(VkDevice device, const VkSemaphoreCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkSemaphore* pSemaphore);
-// typedef void (VKAPI_PTR *PFN_vkDestroySemaphore)(VkDevice device, VkSemaphore semaphore, const VkAllocationCallbacks* pAllocator);
-// typedef VkResult (VKAPI_PTR *PFN_vkCreateEvent)(VkDevice device, const VkEventCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkEvent* pEvent);
-// typedef void (VKAPI_PTR *PFN_vkDestroyEvent)(VkDevice device, VkEvent event, const VkAllocationCallbacks* pAllocator);
-// typedef VkResult (VKAPI_PTR *PFN_vkGetEventStatus)(VkDevice device, VkEvent event);
-// typedef VkResult (VKAPI_PTR *PFN_vkSetEvent)(VkDevice device, VkEvent event);
-// typedef VkResult (VKAPI_PTR *PFN_vkResetEvent)(VkDevice device, VkEvent event);
+// X(vkQueueBindSparse);
+// X(vkCreateFence);
+// X(vkDestroyFence);
+// X(vkResetFences);
+// X(vkGetFenceStatus);
+// X(vkWaitForFences);
+    X(vkCreateSemaphore);
+    X(vkDestroySemaphore);
+// X(vkCreateEvent);
+// X(vkDestroyEvent);
+// X(vkGetEventStatus);
+// X(vkSetEvent);
+// X(vkResetEvent);
 
-// typedef VkResult (VKAPI_PTR *PFN_vkCreateRenderPass)(VkDevice device, const VkRenderPassCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkRenderPass* pRenderPass);
-// typedef void (VKAPI_PTR *PFN_vkDestroyRenderPass)(VkDevice device, VkRenderPass renderPass, const VkAllocationCallbacks* pAllocator);
+    X(vkCreateRenderPass);
+    X(vkDestroyRenderPass);
 
     X(vkCreateCommandPool);
     X(vkDestroyCommandPool);
@@ -883,37 +1207,57 @@ LAYER_FN(PFN_vkVoidFunction) vkGetDeviceProcAddr(VkDevice device, const char *fu
     X(vkEndCommandBuffer);
     X(vkResetCommandBuffer);
 
+    X(vkCmdBindPipeline);
+    X(vkCmdSetViewport);
+    X(vkCmdSetScissor);
+// X(vkCmdSetDepthBias);
+// X(vkCmdSetBlendConstants);
+// X(vkCmdSetDepthBounds);
+// X(vkCmdSetStencilCompareMask);
+// X(vkCmdSetStencilWriteMask);
+// X(vkCmdSetStencilReference);
+    X(vkCmdBindDescriptorSets);
+// X(vkCmdBindIndexBuffer);
+    X(vkCmdBindVertexBuffers);
     X(vkCmdDraw);
     X(vkCmdDrawIndexed);
-// typedef void (VKAPI_PTR *PFN_vkCmdDrawIndirect)(VkCommandBuffer commandBuffer, VkBuffer buffer, VkDeviceSize offset, uint32_t drawCount, uint32_t stride);
-// typedef void (VKAPI_PTR *PFN_vkCmdDrawIndexedIndirect)(VkCommandBuffer commandBuffer, VkBuffer buffer, VkDeviceSize offset, uint32_t drawCount, uint32_t stride);
-// typedef void (VKAPI_PTR *PFN_vkCmdDispatch)(VkCommandBuffer commandBuffer, uint32_t x, uint32_t y, uint32_t z);
-// typedef void (VKAPI_PTR *PFN_vkCmdDispatchIndirect)(VkCommandBuffer commandBuffer, VkBuffer buffer, VkDeviceSize offset);
-// typedef void (VKAPI_PTR *PFN_vkCmdCopyBuffer)(VkCommandBuffer commandBuffer, VkBuffer srcBuffer, VkBuffer dstBuffer, uint32_t regionCount, const VkBufferCopy* pRegions);
-// typedef void (VKAPI_PTR *PFN_vkCmdCopyImage)(VkCommandBuffer commandBuffer, VkImage srcImage, VkImageLayout srcImageLayout, VkImage dstImage, VkImageLayout dstImageLayout, uint32_t regionCount, const VkImageCopy* pRegions);
-// typedef void (VKAPI_PTR *PFN_vkCmdBlitImage)(VkCommandBuffer commandBuffer, VkImage srcImage, VkImageLayout srcImageLayout, VkImage dstImage, VkImageLayout dstImageLayout, uint32_t regionCount, const VkImageBlit* pRegions, VkFilter filter);
-// typedef void (VKAPI_PTR *PFN_vkCmdCopyBufferToImage)(VkCommandBuffer commandBuffer, VkBuffer srcBuffer, VkImage dstImage, VkImageLayout dstImageLayout, uint32_t regionCount, const VkBufferImageCopy* pRegions);
-// typedef void (VKAPI_PTR *PFN_vkCmdCopyImageToBuffer)(VkCommandBuffer commandBuffer, VkImage srcImage, VkImageLayout srcImageLayout, VkBuffer dstBuffer, uint32_t regionCount, const VkBufferImageCopy* pRegions);
-// typedef void (VKAPI_PTR *PFN_vkCmdUpdateBuffer)(VkCommandBuffer commandBuffer, VkBuffer dstBuffer, VkDeviceSize dstOffset, VkDeviceSize dataSize, const uint32_t* pData);
-// typedef void (VKAPI_PTR *PFN_vkCmdFillBuffer)(VkCommandBuffer commandBuffer, VkBuffer dstBuffer, VkDeviceSize dstOffset, VkDeviceSize size, uint32_t data);
-// typedef void (VKAPI_PTR *PFN_vkCmdClearColorImage)(VkCommandBuffer commandBuffer, VkImage image, VkImageLayout imageLayout, const VkClearColorValue* pColor, uint32_t rangeCount, const VkImageSubresourceRange* pRanges);
-// typedef void (VKAPI_PTR *PFN_vkCmdClearDepthStencilImage)(VkCommandBuffer commandBuffer, VkImage image, VkImageLayout imageLayout, const VkClearDepthStencilValue* pDepthStencil, uint32_t rangeCount, const VkImageSubresourceRange* pRanges);
-// typedef void (VKAPI_PTR *PFN_vkCmdClearAttachments)(VkCommandBuffer commandBuffer, uint32_t attachmentCount, const VkClearAttachment* pAttachments, uint32_t rectCount, const VkClearRect* pRects);
-// typedef void (VKAPI_PTR *PFN_vkCmdResolveImage)(VkCommandBuffer commandBuffer, VkImage srcImage, VkImageLayout srcImageLayout, VkImage dstImage, VkImageLayout dstImageLayout, uint32_t regionCount, const VkImageResolve* pRegions);
-// typedef void (VKAPI_PTR *PFN_vkCmdSetEvent)(VkCommandBuffer commandBuffer, VkEvent event, VkPipelineStageFlags stageMask);
-// typedef void (VKAPI_PTR *PFN_vkCmdResetEvent)(VkCommandBuffer commandBuffer, VkEvent event, VkPipelineStageFlags stageMask);
-// typedef void (VKAPI_PTR *PFN_vkCmdWaitEvents)(VkCommandBuffer commandBuffer, uint32_t eventCount, const VkEvent* pEvents, VkPipelineStageFlags srcStageMask, VkPipelineStageFlags dstStageMask, uint32_t memoryBarrierCount, const VkMemoryBarrier* pMemoryBarriers, uint32_t bufferMemoryBarrierCount, const VkBufferMemoryBarrier* pBufferMemoryBarriers, uint32_t imageMemoryBarrierCount, const VkImageMemoryBarrier* pImageMemoryBarriers);
+// X(vkCmdDrawIndirect);
+// X(vkCmdDrawIndexedIndirect);
+// X(vkCmdDispatch);
+// X(vkCmdDispatchIndirect);
+// X(vkCmdCopyBuffer);
+    X(vkCmdCopyImage);
+// X(vkCmdBlitImage);
+// X(vkCmdCopyBufferToImage);
+// X(vkCmdCopyImageToBuffer);
+// X(vkCmdUpdateBuffer);
+// X(vkCmdFillBuffer);
+// X(vkCmdClearColorImage);
+// X(vkCmdClearDepthStencilImage);
+// X(vkCmdClearAttachments);
+// X(vkCmdResolveImage);
+// X(vkCmdSetEvent);
+// X(vkCmdResetEvent);
+// X(vkCmdWaitEvents);
     X(vkCmdPipelineBarrier);
-// typedef void (VKAPI_PTR *PFN_vkCmdBeginQuery)(VkCommandBuffer commandBuffer, VkQueryPool queryPool, uint32_t query, VkQueryControlFlags flags);
-// typedef void (VKAPI_PTR *PFN_vkCmdEndQuery)(VkCommandBuffer commandBuffer, VkQueryPool queryPool, uint32_t query);
-// typedef void (VKAPI_PTR *PFN_vkCmdResetQueryPool)(VkCommandBuffer commandBuffer, VkQueryPool queryPool, uint32_t firstQuery, uint32_t queryCount);
-// typedef void (VKAPI_PTR *PFN_vkCmdWriteTimestamp)(VkCommandBuffer commandBuffer, VkPipelineStageFlagBits pipelineStage, VkQueryPool queryPool, uint32_t query);
-// typedef void (VKAPI_PTR *PFN_vkCmdCopyQueryPoolResults)(VkCommandBuffer commandBuffer, VkQueryPool queryPool, uint32_t firstQuery, uint32_t queryCount, VkBuffer dstBuffer, VkDeviceSize dstOffset, VkDeviceSize stride, VkQueryResultFlags flags);
-// typedef void (VKAPI_PTR *PFN_vkCmdPushConstants)(VkCommandBuffer commandBuffer, VkPipelineLayout layout, VkShaderStageFlags stageFlags, uint32_t offset, uint32_t size, const void* pValues);
+// X(vkCmdBeginQuery);
+// X(vkCmdEndQuery);
+// X(vkCmdResetQueryPool);
+// X(vkCmdWriteTimestamp);
+// X(vkCmdCopyQueryPoolResults);
+// X(vkCmdPushConstants);
     X(vkCmdBeginRenderPass);
     X(vkCmdNextSubpass);
     X(vkCmdEndRenderPass);
-// typedef void (VKAPI_PTR *PFN_vkCmdExecuteCommands)(VkCommandBuffer commandBuffer, uint32_t commandBufferCount, const VkCommandBuffer* pCommandBuffers);
+// X(vkCmdExecuteCommands);
+
+// typedef VkResult (VKAPI_PTR *PFN_vkCreateSwapchainKHR)(VkDevice device, const VkSwapchainCreateInfoKHR* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkSwapchainKHR* pSwapchain);
+// typedef void (VKAPI_PTR *PFN_vkDestroySwapchainKHR)(VkDevice device, VkSwapchainKHR swapchain, const VkAllocationCallbacks* pAllocator);
+// typedef VkResult (VKAPI_PTR *PFN_vkGetSwapchainImagesKHR)(VkDevice device, VkSwapchainKHR swapchain, uint32_t* pSwapchainImageCount, VkImage* pSwapchainImages);
+    X(vkAcquireNextImageKHR);
+    X(vkQueuePresentKHR);
+
+// typedef VkResult (VKAPI_PTR *PFN_vkCreateSharedSwapchainsKHR)(VkDevice device, uint32_t swapchainCount, const VkSwapchainCreateInfoKHR* pCreateInfos, const VkAllocationCallbacks* pAllocator, VkSwapchainKHR* pSwapchains);
 
 
 #undef X
