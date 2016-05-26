@@ -132,7 +132,7 @@ struct layer_data {
     unordered_map<VkCommandPool, CMD_POOL_INFO> commandPoolMap;
     unordered_map<VkDescriptorPool, DESCRIPTOR_POOL_NODE *> descriptorPoolMap;
     unordered_map<VkDescriptorSet, cvdescriptorset::DescriptorSet *> setMap;
-    unordered_map<VkDescriptorSetLayout, cvdescriptorset::DescriptorSetLayout *> descriptorSetLayoutMap;
+    unordered_map<VkDescriptorSetLayout, std::unique_ptr<cvdescriptorset::DescriptorSetLayout>> descriptorSetLayoutMap;
     unordered_map<VkPipelineLayout, PIPELINE_LAYOUT_NODE> pipelineLayoutMap;
     unordered_map<VkDeviceMemory, DEVICE_MEM_INFO> memObjMap;
     unordered_map<VkFence, FENCE_NODE> fenceMap;
@@ -1998,7 +1998,7 @@ static cvdescriptorset::DescriptorSetLayout const *getDescriptorSetLayout(layer_
     if (it == my_data->descriptorSetLayoutMap.end()) {
         return nullptr;
     }
-    return it->second;
+    return it->second.get();
 }
 
 static PIPELINE_LAYOUT_NODE const *getPipelineLayout(layer_data const *my_data, VkPipelineLayout pipeLayout) {
@@ -3959,9 +3959,6 @@ VKAPI_ATTR void VKAPI_CALL DestroyDevice(VkDevice device, const VkAllocationCall
     deletePools(dev_data);
     // All sets should be removed
     assert(dev_data->setMap.empty());
-    for (auto del_layout : dev_data->descriptorSetLayoutMap) {
-        delete del_layout.second;
-    }
     dev_data->descriptorSetLayoutMap.clear();
     dev_data->imageViewMap.clear();
     dev_data->imageMap.clear();
@@ -5716,8 +5713,8 @@ CreateDescriptorSetLayout(VkDevice device, const VkDescriptorSetLayoutCreateInfo
     if (VK_SUCCESS == result) {
         // TODOSC : Capture layout bindings set
         std::lock_guard<std::mutex> lock(global_lock);
-        dev_data->descriptorSetLayoutMap[*pSetLayout] =
-            new cvdescriptorset::DescriptorSetLayout(dev_data->report_data, pCreateInfo, *pSetLayout);
+        dev_data->descriptorSetLayoutMap[*pSetLayout] = std::unique_ptr<cvdescriptorset::DescriptorSetLayout>(
+            new cvdescriptorset::DescriptorSetLayout(dev_data->report_data, pCreateInfo, *pSetLayout));
     }
     return result;
 }
