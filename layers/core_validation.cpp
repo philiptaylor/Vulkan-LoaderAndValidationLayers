@@ -36,6 +36,7 @@
 #include <iostream>
 #include <list>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <set>
 #include <stdio.h>
@@ -132,7 +133,7 @@ struct layer_data {
     unordered_map<VkCommandPool, CMD_POOL_INFO> commandPoolMap;
     unordered_map<VkDescriptorPool, DESCRIPTOR_POOL_NODE *> descriptorPoolMap;
     unordered_map<VkDescriptorSet, cvdescriptorset::DescriptorSet *> setMap;
-    unordered_map<VkDescriptorSetLayout, std::unique_ptr<cvdescriptorset::DescriptorSetLayout>> descriptorSetLayoutMap;
+    unordered_map<VkDescriptorSetLayout, std::shared_ptr<cvdescriptorset::DescriptorSetLayout>> descriptorSetLayoutMap;
     unordered_map<VkPipelineLayout, PIPELINE_LAYOUT_NODE> pipelineLayoutMap;
     unordered_map<VkDeviceMemory, DEVICE_MEM_INFO> memObjMap;
     unordered_map<VkFence, FENCE_NODE> fenceMap;
@@ -1993,12 +1994,13 @@ static FRAMEBUFFER_NODE *getFramebuffer(layer_data *my_data, VkFramebuffer frame
     return &it->second;
 }
 
-static cvdescriptorset::DescriptorSetLayout const *getDescriptorSetLayout(layer_data const *my_data, VkDescriptorSetLayout dsLayout) {
+static std::shared_ptr<cvdescriptorset::DescriptorSetLayout const> getDescriptorSetLayout(layer_data const *my_data,
+                                                                                          VkDescriptorSetLayout dsLayout) {
     auto it = my_data->descriptorSetLayoutMap.find(dsLayout);
     if (it == my_data->descriptorSetLayoutMap.end()) {
         return nullptr;
     }
-    return it->second.get();
+    return it->second;
 }
 
 static PIPELINE_LAYOUT_NODE const *getPipelineLayout(layer_data const *my_data, VkPipelineLayout pipeLayout) {
@@ -2194,7 +2196,7 @@ static bool verify_set_layout_compatibility(layer_data *my_data, const cvdescrip
         return false;
     }
     auto layout_node = pipeline_layout->setLayouts[layoutIndex];
-    return pSet->IsCompatible(layout_node, &errorMsg);
+    return pSet->IsCompatible(layout_node.get(), &errorMsg);
 }
 
 // Validate that data for each specialization entry is fully contained within the buffer.
@@ -5713,8 +5715,8 @@ CreateDescriptorSetLayout(VkDevice device, const VkDescriptorSetLayoutCreateInfo
     if (VK_SUCCESS == result) {
         // TODOSC : Capture layout bindings set
         std::lock_guard<std::mutex> lock(global_lock);
-        dev_data->descriptorSetLayoutMap[*pSetLayout] = std::unique_ptr<cvdescriptorset::DescriptorSetLayout>(
-            new cvdescriptorset::DescriptorSetLayout(dev_data->report_data, pCreateInfo, *pSetLayout));
+        dev_data->descriptorSetLayoutMap[*pSetLayout] =
+            std::make_shared<cvdescriptorset::DescriptorSetLayout>(dev_data->report_data, pCreateInfo, *pSetLayout);
     }
     return result;
 }
@@ -5932,7 +5934,7 @@ AllocateDescriptorSets(VkDevice device, const VkDescriptorSetAllocateInfo *pAllo
     std::unique_lock<std::mutex> lock(global_lock);
 
     for (uint32_t i = 0; i < pAllocateInfo->descriptorSetCount; i++) {
-        layout_nodes[i] = getDescriptorSetLayout(dev_data, pAllocateInfo->pSetLayouts[i]);
+        layout_nodes[i] = getDescriptorSetLayout(dev_data, pAllocateInfo->pSetLayouts[i]).get();
         if (!layout_nodes[i]) {
             skipCall |= log_msg(dev_data->report_data, VK_DEBUG_REPORT_ERROR_BIT_EXT, VK_DEBUG_REPORT_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT_EXT,
                         (uint64_t)pAllocateInfo->pSetLayouts[i], __LINE__, DRAWSTATE_INVALID_LAYOUT, "DS",
