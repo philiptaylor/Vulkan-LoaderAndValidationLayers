@@ -259,49 +259,90 @@ void dumpVec4(const char *note, vec4 vector) {
     fflush(stdout);
 }
 
-VKAPI_ATTR VkBool32 VKAPI_CALL
-dbgFunc(VkFlags msgFlags, VkDebugReportObjectTypeEXT objType,
-        uint64_t srcObject, size_t location, int32_t msgCode,
-        const char *pLayerPrefix, const char *pMsg, void *pUserData) {
-    char *message = (char *)malloc(strlen(pMsg) + 100);
+static void PrintMessage(const char *msg)
+{
+    printf("%s", msg);
+    fflush(stdout);
+#ifdef _WIN32
+    // It's awkward to read stdout in Visual Studio, so duplicate the message
+    // into VS's debug output window
+    OutputDebugStringA(msg);
+#endif
+}
 
-    assert(message);
+static void PrintfMessage(const char *fmt, ...)
+{
+    size_t buf_size = 1024;
+    char *buf = malloc(buf_size);
 
-    if (msgFlags & VK_DEBUG_REPORT_ERROR_BIT_EXT) {
-        sprintf(message, "ERROR: [%s] Code %d : %s", pLayerPrefix, msgCode,
-                pMsg);
-        validation_error = 1;
-    } else if (msgFlags & VK_DEBUG_REPORT_WARNING_BIT_EXT) {
-        // We know that we're submitting queues without fences, ignore this
-        // warning
-        if (strstr(pMsg,
-                   "vkQueueSubmit parameter, VkFence fence, is null pointer")) {
-            return false;
-        }
-        sprintf(message, "WARNING: [%s] Code %d : %s", pLayerPrefix, msgCode,
-                pMsg);
-        validation_error = 1;
-    } else {
-        validation_error = 1;
-        return false;
+    // In <=VS2013, vsnprintf returns -1 on truncation.
+    // On >=VS2015 and Linux, it returns the untruncated length required.
+    // To cope with both behaviours, just keep retrying with bigger buffers until it works.
+
+    const int max_iters = 10; // avoid infinite loops
+    for (int i = 0; i < max_iters; ++i)
+    {
+        va_list ap;
+        va_start(ap, fmt);
+        int r = vsnprintf(buf, buf_size, fmt, ap);
+        va_end(ap);
+
+        // r < 0 indicates error,
+        // r == buf.size() indicates there wasn't enough space for the null terminator,
+        // r > buf.size() indicates there wasn't enough space for the message
+        if (r >= 0 && r < buf_size)
+            break;
+
+        buf_size *= 2;
+        buf = realloc(buf, buf_size);
     }
 
-#ifdef _WIN32
-    MessageBox(NULL, message, "Alert", MB_OK);
-#else
-    printf("%s\n", message);
-    fflush(stdout);
-#endif
-    free(message);
+    PrintMessage(buf);
 
-    /*
-     * false indicates that layer should not bail-out of an
-     * API call that had validation failures. This may mean that the
-     * app dies inside the driver due to invalid parameter(s).
-     * That's what would happen without validation layers, so we'll
-     * keep that behavior here.
-     */
-    return false;
+    free(buf);
+}
+
+VKAPI_ATTR VkBool32 VKAPI_CALL
+dbgFunc(
+    VkDebugReportFlagsEXT flags,
+    VkDebugReportObjectTypeEXT objectType,
+    uint64_t object,
+    size_t location,
+    int32_t messageCode,
+    const char *pLayerPrefix,
+    const char *pMessage,
+    void *pUserData)
+{
+    const char *severity;
+    // Multiple bits might be set, so pick the most severe one
+    if (flags & VK_DEBUG_REPORT_ERROR_BIT_EXT)
+        severity = "ERROR";
+    else if (flags & VK_DEBUG_REPORT_WARNING_BIT_EXT)
+        severity = "WARN";
+    else if (flags & VK_DEBUG_REPORT_PERFORMANCE_WARNING_BIT_EXT)
+        severity = "PERF";
+    else if (flags & VK_DEBUG_REPORT_INFORMATION_BIT_EXT)
+        severity = "INFO";
+    else if (flags & VK_DEBUG_REPORT_DEBUG_BIT_EXT)
+        severity = "DBUG"; // intentional misspelling to make the widths prettier
+    else
+        severity = "???";
+
+    if (1)
+        PrintfMessage("[%s][CALLBACK] %s: %s [flags=0x%x objectType=%d object=0x%llx location=%d messageCode=%d pUserData=%p]\n",
+            severity, pLayerPrefix, pMessage, flags, objectType, (unsigned long long)object, location, messageCode, pUserData);
+    else
+        PrintfMessage("[%s][CALLBACK] %s: %s\n", severity, pLayerPrefix, pMessage);
+
+#ifdef _WIN32
+    if (flags & VK_DEBUG_REPORT_ERROR_BIT_EXT)
+    {
+        if (IsDebuggerPresent())
+            DebugBreak();
+    }
+#endif
+
+    return VK_FALSE;
 }
 
 VKAPI_ATTR VkBool32 VKAPI_CALL
@@ -2137,7 +2178,8 @@ static void demo_init_vk(struct demo *demo) {
     demo->enabled_layer_count = 0;
 
     char *instance_validation_layers_alt1[] = {
-        "VK_LAYER_LUNARG_standard_validation"
+        "VK_LAYER_XXX_sync"
+        //"VK_LAYER_LUNARG_standard_validation"
     };
 
     char *instance_validation_layers_alt2[] = {
@@ -2169,7 +2211,8 @@ static void demo_init_vk(struct demo *demo) {
                     instance_layers);
             if (validation_found) {
                 demo->enabled_layer_count = ARRAY_SIZE(instance_validation_layers_alt1);
-                demo->device_validation_layers[0] = "VK_LAYER_LUNARG_standard_validation";
+                //demo->device_validation_layers[0] = "VK_LAYER_LUNARG_standard_validation";
+                demo->device_validation_layers[0] = "VK_LAYER_XXX_sync";
                 device_validation_layer_count = 1;
             } else {
                 // use alternative set of validation layers
@@ -2308,6 +2351,8 @@ static void demo_init_vk(struct demo *demo) {
         dbgCreateInfo.pUserData = NULL;
         dbgCreateInfo.flags =
             VK_DEBUG_REPORT_ERROR_BIT_EXT | VK_DEBUG_REPORT_WARNING_BIT_EXT;
+        dbgCreateInfo.flags |=
+            VK_DEBUG_REPORT_INFORMATION_BIT_EXT | VK_DEBUG_REPORT_DEBUG_BIT_EXT | VK_DEBUG_REPORT_PERFORMANCE_WARNING_BIT_EXT;
         inst_info.pNext = &dbgCreateInfo;
     }
 
@@ -2457,6 +2502,8 @@ static void demo_init_vk(struct demo *demo) {
         dbgCreateInfo.pUserData = NULL;
         dbgCreateInfo.flags =
             VK_DEBUG_REPORT_ERROR_BIT_EXT | VK_DEBUG_REPORT_WARNING_BIT_EXT;
+        dbgCreateInfo.flags |=
+            VK_DEBUG_REPORT_INFORMATION_BIT_EXT | VK_DEBUG_REPORT_DEBUG_BIT_EXT | VK_DEBUG_REPORT_PERFORMANCE_WARNING_BIT_EXT;
         err = demo->CreateDebugReportCallback(demo->inst, &dbgCreateInfo, NULL,
                                               &demo->msg_callback);
         switch (err) {

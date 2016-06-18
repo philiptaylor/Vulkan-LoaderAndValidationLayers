@@ -1953,7 +1953,7 @@ static void demo_init_vk(struct demo *demo) {
     inst_dbgCreateInfo.pfnCallback = demo->use_break ? BreakCallback : dbgFunc;
     inst_dbgCreateInfo.pUserData = NULL;
     inst_dbgCreateInfo.pNext = NULL;
-    
+
     VkInstanceCreateInfo inst_info = {
         .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
         .pNext = &inst_dbgCreateInfo,
