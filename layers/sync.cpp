@@ -36,6 +36,21 @@
  * to detect the error until submission).
  */
 
+/**
+ * TODO:
+ *
+ * v1:
+ *  Detect incorrect usage of image transitions:
+ *    Track memory bound to image
+ *    Layout transition barrier counts as read+write events on image's memory
+ *    Track image view constructed from image
+ *    Track descriptor set layouts
+ *    Track descriptor sets
+ *    Look at descriptor sets bound during draw (which refer to image views) (assume draw will access all bound memory)
+ *    Construct a DAG of read+write events on stages
+ *    Complain that the DAG has race conditions
+ */
+
 
 #include <unordered_map>
 #include <mutex>
@@ -56,11 +71,11 @@
         VK_DEBUG_REPORT_OBJECT_TYPE_##objType##_EXT, (uint64_t)(object), \
         __LINE__, (messageCode), "SYNC", (fmt), __VA_ARGS__)
 
-#define LOG_INFO(layer_data, objType, object, messageCode, fmt, ...) _LOG_GENERIC(VK_DEBUG_REPORT_INFORMATION_BIT_EXT, layer_data, objType, object, messageCode, fmt, __VA_ARGS__)
-#define LOG_WARN(layer_data, objType, object, messageCode, fmt, ...) _LOG_GENERIC(VK_DEBUG_REPORT_WARNING_BIT_EXT, layer_data, objType, object, messageCode, fmt, __VA_ARGS__)
-#define LOG_PERF(layer_data, objType, object, messageCode, fmt, ...) _LOG_GENERIC(VK_DEBUG_REPORT_PERFORMANCE_WARNING_BIT_EXT, layer_data, objType, object, messageCode, fmt, __VA_ARGS__)
-#define LOG_ERROR(layer_data, objType, object, messageCode, fmt, ...) _LOG_GENERIC(VK_DEBUG_REPORT_ERROR_BIT_EXT, layer_data, objType, object, messageCode, fmt, __VA_ARGS__)
-#define LOG_DEBUG(layer_data, objType, object, messageCode, fmt, ...) _LOG_GENERIC(VK_DEBUG_REPORT_DEBUG_BIT_EXT, layer_data, objType, object, messageCode, fmt, __VA_ARGS__)
+#define LOG_INFO(layer_data, objType, object, messageCode, fmt, ...)  _LOG_GENERIC(VK_DEBUG_REPORT_INFORMATION_BIT_EXT,         layer_data, objType, object, messageCode, fmt, __VA_ARGS__)
+#define LOG_WARN(layer_data, objType, object, messageCode, fmt, ...)  _LOG_GENERIC(VK_DEBUG_REPORT_WARNING_BIT_EXT,             layer_data, objType, object, messageCode, fmt, __VA_ARGS__)
+#define LOG_PERF(layer_data, objType, object, messageCode, fmt, ...)  _LOG_GENERIC(VK_DEBUG_REPORT_PERFORMANCE_WARNING_BIT_EXT, layer_data, objType, object, messageCode, fmt, __VA_ARGS__)
+#define LOG_ERROR(layer_data, objType, object, messageCode, fmt, ...) _LOG_GENERIC(VK_DEBUG_REPORT_ERROR_BIT_EXT,               layer_data, objType, object, messageCode, fmt, __VA_ARGS__)
+#define LOG_DEBUG(layer_data, objType, object, messageCode, fmt, ...) _LOG_GENERIC(VK_DEBUG_REPORT_DEBUG_BIT_EXT,               layer_data, objType, object, messageCode, fmt, __VA_ARGS__)
 
 struct layer_instance_data
 {
@@ -182,7 +197,8 @@ static const VkLayerProperties global_layers[] = {{
 }};
 
 LAYER_FN(VkResult) vkEnumerateInstanceLayerProperties(
-    uint32_t *pCount, VkLayerProperties *pProperties)
+    uint32_t *pCount,
+    VkLayerProperties *pProperties)
 {
     return util_GetLayerProperties(ARRAY_SIZE(global_layers), global_layers, pCount, pProperties);
 }
@@ -558,7 +574,7 @@ LAYER_FN(void) vkDestroyRenderPass(
         if (it == device_data->sync.render_passes.end())
         {
             if (LOG_ERROR(device_data, RENDER_PASS, renderPass, SYNC_MSG_INVALID_PARAM,
-                "vkDestroyRenderPass called with unknown renderPass"))
+                    "vkDestroyRenderPass called with unknown renderPass"))
                 return;
         }
         else
