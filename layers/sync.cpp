@@ -383,7 +383,66 @@ LAYER_FN(void) vkDebugReportMessageEXT(
 }
 
 
+static bool dump_command_buffer(
+    layer_device_data *device_data,
+    sync_command_buffer &buf)
+{
+    VkPipeline graphics_pipeline = VK_NULL_HANDLE;
+    VkPipeline compute_pipeline = VK_NULL_HANDLE;
 
+    for (auto &cmd : buf.commands)
+    {
+        cmd->update_pipeline_binding(&graphics_pipeline, &compute_pipeline);
+        if (cmd->is_draw())
+        {
+            if (graphics_pipeline == VK_NULL_HANDLE)
+            {
+                return LOG_ERROR(device_data, COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
+                    "Draw command called with no pipeline bound");
+            }
+
+            auto pipeline = device_data->sync.graphics_pipelines.find(graphics_pipeline);
+            if (pipeline == device_data->sync.graphics_pipelines.end())
+            {
+                return LOG_ERROR(device_data, COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
+                    "Draw command called with unknown pipeline bound");
+            }
+
+            auto layout = device_data->sync.pipeline_layouts.find(pipeline->second.layout);
+            if (layout == device_data->sync.pipeline_layouts.end())
+            {
+                return LOG_ERROR(device_data, COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
+                    "Draw command called with pipeline with unknown pipeline layout");
+            }
+
+            std::stringstream str;
+            str << "Draw command: ";
+            cmd->to_string(str);
+            str << "\n    Current pipeline:\n      ";
+            pipeline->second.to_string(str);
+            str << "\n    Current pipeline layout:\n      ";
+            layout->second.to_string(str);
+            for (auto &setLayout : layout->second.setLayouts)
+            {
+                auto set_layout = device_data->sync.descriptor_set_layouts.find(setLayout);
+                if (set_layout == device_data->sync.descriptor_set_layouts.end())
+                {
+                    return LOG_ERROR(device_data, COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
+                        "Draw command called with pipeline layout with unknown descriptor set layout");
+                }
+
+                str << "\n        ";
+                set_layout->second.to_string(str);
+            }
+
+            if (LOG_INFO(device_data, COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
+                    "%s", str.str().c_str()))
+                return true;
+        }
+    }
+
+    return false;
+}
 
 
 LAYER_FN(VkResult) vkQueueSubmit(
@@ -418,15 +477,20 @@ LAYER_FN(VkResult) vkQueueSubmit(
 
                 sync_command_buffer &buf = it->second;
 
-                std::stringstream str;
-                for (auto &cmd : buf.commands)
                 {
-                    str << "    ";
-                    cmd->to_string(str);
-                    str << "\n";
+                    std::stringstream str;
+                    for (auto &cmd : buf.commands)
+                    {
+                        str << "    ";
+                        cmd->to_string(str);
+                        str << "\n";
+                    }
+                    skipCall |= LOG_INFO(device_data, COMMAND_BUFFER, command_buffer, SYNC_MSG_NONE,
+                        "Command buffer contents:\n%s", str.str().c_str());
                 }
-                skipCall |= LOG_INFO(device_data, COMMAND_BUFFER, command_buffer, SYNC_MSG_NONE,
-                    "Command buffer contents:\n%s", str.str().c_str());
+
+                skipCall |= dump_command_buffer(device_data, buf);
+
             }
         }
     }
@@ -458,6 +522,16 @@ LAYER_FN(VkResult) vkDeviceWaitIdle(
 
     return device_data->dispatch.DeviceWaitIdle(device);
 }
+
+// LAYER_FN(VkResult) vkAllocateMemory(VkDevice device, const VkMemoryAllocateInfo* pAllocateInfo, const VkAllocationCallbacks* pAllocator, VkDeviceMemory* pMemory);
+// LAYER_FN(void) vkFreeMemory(VkDevice device, VkDeviceMemory memory, const VkAllocationCallbacks* pAllocator);
+// LAYER_FN(VkResult) vkMapMemory(VkDevice device, VkDeviceMemory memory, VkDeviceSize offset, VkDeviceSize size, VkMemoryMapFlags flags, void** ppData);
+// LAYER_FN(void) vkUnmapMemory(VkDevice device, VkDeviceMemory memory);
+// LAYER_FN(VkResult) vkFlushMappedMemoryRanges(VkDevice device, uint32_t memoryRangeCount, const VkMappedMemoryRange* pMemoryRanges);
+// LAYER_FN(VkResult) vkInvalidateMappedMemoryRanges(VkDevice device, uint32_t memoryRangeCount, const VkMappedMemoryRange* pMemoryRanges);
+//
+// LAYER_FN(VkResult) vkBindBufferMemory(VkDevice device, VkBuffer buffer, VkDeviceMemory memory, VkDeviceSize memoryOffset);
+// LAYER_FN(VkResult) vkBindImageMemory(VkDevice device, VkImage image, VkDeviceMemory memory, VkDeviceSize memoryOffset);
 
 // LAYER_FN(VkResult) vkQueueBindSparse(VkQueue queue, uint32_t bindInfoCount, const VkBindSparseInfo* pBindInfo, VkFence fence);
 // LAYER_FN(VkResult) vkCreateFence(VkDevice device, const VkFenceCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkFence* pFence);
@@ -498,6 +572,300 @@ LAYER_FN(void) vkDestroySemaphore(
 // LAYER_FN(VkResult) vkGetEventStatus(VkDevice device, VkEvent event);
 // LAYER_FN(VkResult) vkSetEvent(VkDevice device, VkEvent event);
 // LAYER_FN(VkResult) vkResetEvent(VkDevice device, VkEvent event);
+
+// LAYER_FN(VkResult) vkCreateQueryPool(VkDevice device, const VkQueryPoolCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkQueryPool* pQueryPool);
+// LAYER_FN(void) vkDestroyQueryPool(VkDevice device, VkQueryPool queryPool, const VkAllocationCallbacks* pAllocator);
+// LAYER_FN(VkResult) vkGetQueryPoolResults(VkDevice device, VkQueryPool queryPool, uint32_t firstQuery, uint32_t queryCount, size_t dataSize, void* pData, VkDeviceSize stride, VkQueryResultFlags flags);
+//
+// LAYER_FN(VkResult) vkCreateBuffer(VkDevice device, const VkBufferCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkBuffer* pBuffer);
+// LAYER_FN(void) vkDestroyBuffer(VkDevice device, VkBuffer buffer, const VkAllocationCallbacks* pAllocator);
+//
+// LAYER_FN(VkResult) vkCreateBufferView(VkDevice device, const VkBufferViewCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkBufferView* pView);
+// LAYER_FN(void) vkDestroyBufferView(VkDevice device, VkBufferView bufferView, const VkAllocationCallbacks* pAllocator);
+//
+// LAYER_FN(VkResult) vkCreateImage(VkDevice device, const VkImageCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkImage* pImage);
+// LAYER_FN(void) vkDestroyImage(VkDevice device, VkImage image, const VkAllocationCallbacks* pAllocator);
+//
+// LAYER_FN(VkResult) vkCreateImageView(VkDevice device, const VkImageViewCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkImageView* pView);
+// LAYER_FN(void) vkDestroyImageView(VkDevice device, VkImageView imageView, const VkAllocationCallbacks* pAllocator);
+//
+// LAYER_FN(VkResult) vkCreateShaderModule(VkDevice device, const VkShaderModuleCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkShaderModule* pShaderModule);
+// LAYER_FN(void) vkDestroyShaderModule(VkDevice device, VkShaderModule shaderModule, const VkAllocationCallbacks* pAllocator);
+
+LAYER_FN(VkResult) vkCreateGraphicsPipelines(
+    VkDevice device,
+    VkPipelineCache pipelineCache,
+    uint32_t createInfoCount,
+    const VkGraphicsPipelineCreateInfo *pCreateInfos,
+    const VkAllocationCallbacks *pAllocator,
+    VkPipeline *pPipelines)
+{
+    auto device_data = get_layer_device_data(device);
+
+    if (LOG_DEBUG(device_data, DEVICE, device, SYNC_MSG_NONE, __FUNCTION__))
+        return VK_ERROR_VALIDATION_FAILED_EXT;
+
+    VkResult result = device_data->dispatch.CreateGraphicsPipelines(device, pipelineCache, createInfoCount, pCreateInfos, pAllocator, pPipelines);
+    if (result != VK_SUCCESS)
+        return result;
+
+    {
+        std::lock_guard<std::mutex> lock(device_data->sync_mutex);
+
+        for (uint32_t p = 0; p < createInfoCount; ++p)
+        {
+            sync_graphics_pipeline pipeline;
+            pipeline.pipeline = pPipelines[p];
+
+            auto &createInfo = pCreateInfos[p];
+
+            pipeline.flags = createInfo.flags;
+
+            for (uint32_t i = 0; i < createInfo.stageCount; ++i)
+            {
+                sync_graphics_pipeline::shader_stage stage;
+                stage.flags = createInfo.pStages[i].flags;
+                stage.stage = createInfo.pStages[i].stage;
+                stage.module = createInfo.pStages[i].module;
+                stage.name = createInfo.pStages[i].pName;
+
+                pipeline.stages.push_back(std::move(stage));
+            }
+
+            pipeline.vertexInputState.flags = createInfo.pVertexInputState->flags;
+            pipeline.vertexInputState.vertexBindingDescriptions = std::vector<VkVertexInputBindingDescription>(
+                createInfo.pVertexInputState->pVertexBindingDescriptions,
+                createInfo.pVertexInputState->pVertexBindingDescriptions + createInfo.pVertexInputState->vertexBindingDescriptionCount
+            );
+            pipeline.vertexInputState.vertexAttributeDescriptions = std::vector<VkVertexInputAttributeDescription>(
+                createInfo.pVertexInputState->pVertexAttributeDescriptions,
+                createInfo.pVertexInputState->pVertexAttributeDescriptions + createInfo.pVertexInputState->vertexAttributeDescriptionCount
+            );
+
+            pipeline.inputAssemblyState.flags = createInfo.pInputAssemblyState->flags;
+            pipeline.inputAssemblyState.topology = createInfo.pInputAssemblyState->topology;
+            pipeline.inputAssemblyState.primitiveRestartEnable = createInfo.pInputAssemblyState->primitiveRestartEnable;
+
+            pipeline.layout = createInfo.layout;
+            pipeline.renderPass = createInfo.renderPass;
+            pipeline.subpass = createInfo.subpass;
+
+            bool inserted = device_data->sync.graphics_pipelines.insert(std::make_pair(
+                pPipelines[p],
+                pipeline
+            )).second;
+
+            if (!inserted)
+            {
+                if (LOG_ERROR(device_data, PIPELINE, pPipelines[p], SYNC_MSG_INTERNAL_ERROR,
+                        "Internal error in vkCreateGraphicsPipelines: new pipeline already exists"))
+                    return VK_ERROR_VALIDATION_FAILED_EXT;
+            }
+        }
+    }
+
+    return result;
+}
+
+// LAYER_FN(VkResult) vkCreateComputePipelines(VkDevice device, VkPipelineCache pipelineCache, uint32_t createInfoCount, const VkComputePipelineCreateInfo* pCreateInfos, const VkAllocationCallbacks* pAllocator, VkPipeline* pPipelines);
+
+LAYER_FN(void) vkDestroyPipeline(
+    VkDevice device,
+    VkPipeline pipeline,
+    const VkAllocationCallbacks *pAllocator)
+{
+    auto device_data = get_layer_device_data(device);
+
+    if (LOG_DEBUG(device_data, PIPELINE, pipeline, SYNC_MSG_NONE, __FUNCTION__))
+        return;
+
+    {
+        std::lock_guard<std::mutex> lock(device_data->sync_mutex);
+
+        auto it = device_data->sync.graphics_pipelines.find(pipeline);
+        if (it == device_data->sync.graphics_pipelines.end())
+        {
+            // TODO: this might be a compute pipeline, so check that too
+
+            if (LOG_ERROR(device_data, PIPELINE, pipeline, SYNC_MSG_INVALID_PARAM,
+                    "vkDestroyPipeline called with unknown pipeline"))
+                return;
+        }
+        else
+        {
+            device_data->sync.graphics_pipelines.erase(it);
+        }
+    }
+
+    device_data->dispatch.DestroyPipeline(device, pipeline, pAllocator);
+}
+
+LAYER_FN(VkResult) vkCreatePipelineLayout(
+    VkDevice device,
+    const VkPipelineLayoutCreateInfo *pCreateInfo,
+    const VkAllocationCallbacks *pAllocator,
+    VkPipelineLayout *pPipelineLayout)
+{
+    auto device_data = get_layer_device_data(device);
+
+    if (LOG_DEBUG(device_data, DEVICE, device, SYNC_MSG_NONE, __FUNCTION__))
+        return VK_ERROR_VALIDATION_FAILED_EXT;
+
+    VkResult result = device_data->dispatch.CreatePipelineLayout(device, pCreateInfo, pAllocator, pPipelineLayout);
+    if (result != VK_SUCCESS)
+        return result;
+
+    {
+        std::lock_guard<std::mutex> lock(device_data->sync_mutex);
+
+        sync_pipeline_layout pipeline_layout;
+        pipeline_layout.pipeline_layout = *pPipelineLayout;
+
+        pipeline_layout.flags = pCreateInfo->flags;
+        pipeline_layout.setLayouts = std::vector<VkDescriptorSetLayout>(pCreateInfo->pSetLayouts, pCreateInfo->pSetLayouts + pCreateInfo->setLayoutCount);
+        pipeline_layout.pushConstantRanges = std::vector<VkPushConstantRange>(pCreateInfo->pPushConstantRanges, pCreateInfo->pPushConstantRanges + pCreateInfo->pushConstantRangeCount);
+
+        bool inserted = device_data->sync.pipeline_layouts.insert(std::make_pair(
+            *pPipelineLayout,
+            pipeline_layout
+        )).second;
+
+        if (!inserted)
+        {
+            if (LOG_ERROR(device_data, PIPELINE_LAYOUT, *pPipelineLayout, SYNC_MSG_INTERNAL_ERROR,
+                    "Internal error in vkCreatePipelineLayout: new pipeline layout already exists"))
+                return VK_ERROR_VALIDATION_FAILED_EXT;
+        }
+    }
+
+    return result;
+}
+
+LAYER_FN(void) vkDestroyPipelineLayout(
+    VkDevice device,
+    VkPipelineLayout pipelineLayout,
+    const VkAllocationCallbacks *pAllocator)
+{
+    auto device_data = get_layer_device_data(device);
+
+    if (LOG_DEBUG(device_data, PIPELINE_LAYOUT, pipelineLayout, SYNC_MSG_NONE, __FUNCTION__))
+        return;
+
+    {
+        std::lock_guard<std::mutex> lock(device_data->sync_mutex);
+
+        auto it = device_data->sync.pipeline_layouts.find(pipelineLayout);
+        if (it == device_data->sync.pipeline_layouts.end())
+        {
+            if (LOG_ERROR(device_data, PIPELINE_LAYOUT, pipelineLayout, SYNC_MSG_INVALID_PARAM,
+                    "vkDestroyPipelineLayout called with unknown pipelineLayout"))
+                return;
+        }
+        else
+        {
+            device_data->sync.pipeline_layouts.erase(it);
+        }
+    }
+
+    device_data->dispatch.DestroyPipelineLayout(device, pipelineLayout, pAllocator);
+}
+
+// LAYER_FN(VkResult) vkCreateSampler(VkDevice device, const VkSamplerCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkSampler* pSampler);
+// LAYER_FN(void) vkDestroySampler(VkDevice device, VkSampler sampler, const VkAllocationCallbacks* pAllocator);
+
+LAYER_FN(VkResult) vkCreateDescriptorSetLayout(
+    VkDevice device,
+    const VkDescriptorSetLayoutCreateInfo *pCreateInfo,
+    const VkAllocationCallbacks *pAllocator,
+    VkDescriptorSetLayout *pSetLayout)
+{
+    auto device_data = get_layer_device_data(device);
+
+    if (LOG_DEBUG(device_data, DEVICE, device, SYNC_MSG_NONE, __FUNCTION__))
+        return VK_ERROR_VALIDATION_FAILED_EXT;
+
+    VkResult result = device_data->dispatch.CreateDescriptorSetLayout(device, pCreateInfo, pAllocator, pSetLayout);
+    if (result != VK_SUCCESS)
+        return result;
+
+    {
+        std::lock_guard<std::mutex> lock(device_data->sync_mutex);
+
+        sync_descriptor_set_layout set_layout;
+        set_layout.descriptor_set_layout = *pSetLayout;
+
+        set_layout.flags = pCreateInfo->flags;
+        for (uint32_t i = 0; i < pCreateInfo->bindingCount; ++i)
+        {
+            sync_descriptor_set_layout::descriptor_set_layout_binding new_binding;
+            auto &binding = pCreateInfo->pBindings[i];
+
+            new_binding.binding = binding.binding;
+            new_binding.descriptorType = binding.descriptorType;
+            new_binding.descriptorCount = binding.descriptorCount;
+            new_binding.stageFlags = binding.stageFlags;
+            if (binding.descriptorType == VK_DESCRIPTOR_TYPE_SAMPLER || binding.descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+                if (binding.pImmutableSamplers != nullptr)
+                    new_binding.immutableSamplers = std::vector<VkSampler>(binding.pImmutableSamplers, binding.pImmutableSamplers + binding.descriptorCount);
+
+            set_layout.bindings.push_back(std::move(new_binding));
+        }
+
+        bool inserted = device_data->sync.descriptor_set_layouts.insert(std::make_pair(
+            *pSetLayout,
+            set_layout
+        )).second;
+
+        if (!inserted)
+        {
+            if (LOG_ERROR(device_data, DESCRIPTOR_SET_LAYOUT, *pSetLayout, SYNC_MSG_INTERNAL_ERROR,
+                    "Internal error in vkCreateDescriptorSetLayout: new descriptor set layout already exists"))
+                return VK_ERROR_VALIDATION_FAILED_EXT;
+        }
+    }
+
+    return result;
+}
+
+LAYER_FN(void) vkDestroyDescriptorSetLayout(
+    VkDevice device,
+    VkDescriptorSetLayout descriptorSetLayout,
+    const VkAllocationCallbacks *pAllocator)
+{
+    auto device_data = get_layer_device_data(device);
+
+    if (LOG_DEBUG(device_data, DESCRIPTOR_SET_LAYOUT, descriptorSetLayout, SYNC_MSG_NONE, __FUNCTION__))
+        return;
+
+    {
+        std::lock_guard<std::mutex> lock(device_data->sync_mutex);
+
+        auto it = device_data->sync.descriptor_set_layouts.find(descriptorSetLayout);
+        if (it == device_data->sync.descriptor_set_layouts.end())
+        {
+            if (LOG_ERROR(device_data, DESCRIPTOR_SET_LAYOUT, descriptorSetLayout, SYNC_MSG_INVALID_PARAM,
+                    "vkDestroyDescriptorSetLayout called with unknown descriptorSetLayout"))
+                return;
+        }
+        else
+        {
+            device_data->sync.descriptor_set_layouts.erase(it);
+        }
+    }
+
+    device_data->dispatch.DestroyDescriptorSetLayout(device, descriptorSetLayout, pAllocator);
+}
+
+// LAYER_FN(VkResult) vkCreateDescriptorPool(VkDevice device, const VkDescriptorPoolCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkDescriptorPool* pDescriptorPool);
+// LAYER_FN(void) vkDestroyDescriptorPool(VkDevice device, VkDescriptorPool descriptorPool, const VkAllocationCallbacks* pAllocator);
+// LAYER_FN(VkResult) vkResetDescriptorPool(VkDevice device, VkDescriptorPool descriptorPool, VkDescriptorPoolResetFlags flags);
+//
+// LAYER_FN(VkResult) vkAllocateDescriptorSets(VkDevice device, const VkDescriptorSetAllocateInfo* pAllocateInfo, VkDescriptorSet* pDescriptorSets);
+// LAYER_FN(VkResult) vkFreeDescriptorSets(VkDevice device, VkDescriptorPool descriptorPool, uint32_t descriptorSetCount, const VkDescriptorSet* pDescriptorSets);
+// LAYER_FN(void) vkUpdateDescriptorSets(VkDevice device, uint32_t descriptorWriteCount, const VkWriteDescriptorSet* pDescriptorWrites, uint32_t descriptorCopyCount, const VkCopyDescriptorSet* pDescriptorCopies);
+//
+// LAYER_FN(VkResult) vkCreateFramebuffer(VkDevice device, const VkFramebufferCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkFramebuffer* pFramebuffer);
+// LAYER_FN(void) vkDestroyFramebuffer(VkDevice device, VkFramebuffer framebuffer, const VkAllocationCallbacks* pAllocator);
 
 LAYER_FN(VkResult) vkCreateRenderPass(
     VkDevice device,
@@ -1152,6 +1520,10 @@ LAYER_FN(void) vkCmdEndRenderPass(
 
 // LAYER_FN(void) vkCmdExecuteCommands(VkCommandBuffer commandBuffer, uint32_t commandBufferCount, const VkCommandBuffer* pCommandBuffers);
 
+// LAYER_FN(VkResult) vkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreateInfoKHR* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkSwapchainKHR* pSwapchain);
+// LAYER_FN(void) vkDestroySwapchainKHR(VkDevice device, VkSwapchainKHR swapchain, const VkAllocationCallbacks* pAllocator);
+// LAYER_FN(VkResult) vkGetSwapchainImagesKHR(VkDevice device, VkSwapchainKHR swapchain, uint32_t* pSwapchainImageCount, VkImage* pSwapchainImages);
+
 LAYER_FN(VkResult) vkAcquireNextImageKHR(
     VkDevice device,
     VkSwapchainKHR swapchain,
@@ -1180,6 +1552,8 @@ LAYER_FN(VkResult) vkQueuePresentKHR(
     return device_data->dispatch.QueuePresentKHR(queue, pPresentInfo);
 }
 
+// LAYER_FN(VkResult) vkCreateSharedSwapchainsKHR(VkDevice device, uint32_t swapchainCount, const VkSwapchainCreateInfoKHR* pCreateInfos, const VkAllocationCallbacks* pAllocator, VkSwapchainKHR* pSwapchains);
+
 
 
 
@@ -1197,6 +1571,16 @@ LAYER_FN(PFN_vkVoidFunction) vkGetDeviceProcAddr(VkDevice device, const char *fu
     X(vkQueueWaitIdle);
     X(vkDeviceWaitIdle);
 
+// X(vkAllocateMemory);
+// X(vkFreeMemory);
+// X(vkMapMemory);
+// X(vkUnmapMemory);
+// X(vkFlushMappedMemoryRanges);
+// X(vkInvalidateMappedMemoryRanges);
+//
+// X(vkBindBufferMemory);
+// X(vkBindImageMemory);
+
 // X(vkQueueBindSparse);
 // X(vkCreateFence);
 // X(vkDestroyFence);
@@ -1210,6 +1594,49 @@ LAYER_FN(PFN_vkVoidFunction) vkGetDeviceProcAddr(VkDevice device, const char *fu
 // X(vkGetEventStatus);
 // X(vkSetEvent);
 // X(vkResetEvent);
+
+// X(vkCreateQueryPool);
+// X(vkDestroyQueryPool);
+// X(vkGetQueryPoolResults);
+//
+// X(vkCreateBuffer);
+// X(vkDestroyBuffer);
+//
+// X(vkCreateBufferView);
+// X(vkDestroyBufferView);
+//
+// X(vkCreateImage);
+// X(vkDestroyImage);
+//
+// X(vkCreateImageView);
+// X(vkDestroyImageView);
+//
+// X(vkCreateShaderModule);
+// X(vkDestroyShaderModule);
+
+    X(vkCreateGraphicsPipelines);
+// X(vkCreateComputePipelines);
+    X(vkDestroyPipeline);
+
+    X(vkCreatePipelineLayout);
+    X(vkDestroyPipelineLayout);
+
+// X(vkCreateSampler);
+// X(vkDestroySampler);
+
+    X(vkCreateDescriptorSetLayout);
+    X(vkDestroyDescriptorSetLayout);
+
+// X(vkCreateDescriptorPool);
+// X(vkDestroyDescriptorPool);
+// X(vkResetDescriptorPool);
+//
+// X(vkAllocateDescriptorSets);
+// X(vkFreeDescriptorSets);
+// X(vkUpdateDescriptorSets);
+//
+// X(vkCreateFramebuffer);
+// X(vkDestroyFramebuffer);
 
     X(vkCreateRenderPass);
     X(vkDestroyRenderPass);
@@ -1267,13 +1694,13 @@ LAYER_FN(PFN_vkVoidFunction) vkGetDeviceProcAddr(VkDevice device, const char *fu
     X(vkCmdEndRenderPass);
 // X(vkCmdExecuteCommands);
 
-// typedef VkResult (VKAPI_PTR *PFN_vkCreateSwapchainKHR)(VkDevice device, const VkSwapchainCreateInfoKHR* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkSwapchainKHR* pSwapchain);
-// typedef void (VKAPI_PTR *PFN_vkDestroySwapchainKHR)(VkDevice device, VkSwapchainKHR swapchain, const VkAllocationCallbacks* pAllocator);
-// typedef VkResult (VKAPI_PTR *PFN_vkGetSwapchainImagesKHR)(VkDevice device, VkSwapchainKHR swapchain, uint32_t* pSwapchainImageCount, VkImage* pSwapchainImages);
+// X(vkCreateSwapchainKHR);
+// X(vkDestroySwapchainKHR);
+// X(vkGetSwapchainImagesKHR);
     X(vkAcquireNextImageKHR);
     X(vkQueuePresentKHR);
 
-// typedef VkResult (VKAPI_PTR *PFN_vkCreateSharedSwapchainsKHR)(VkDevice device, uint32_t swapchainCount, const VkSwapchainCreateInfoKHR* pCreateInfos, const VkAllocationCallbacks* pAllocator, VkSwapchainKHR* pSwapchains);
+// X(vkCreateSharedSwapchainsKHR);
 
 
 #undef X

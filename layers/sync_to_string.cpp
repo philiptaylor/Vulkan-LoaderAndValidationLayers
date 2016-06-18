@@ -211,3 +211,73 @@ void sync_cmd_end_render_pass::to_string(std::ostream &str)
     str << "vkCmdEndRenderPass {";
     str << " }";
 }
+
+
+void sync_descriptor_set_layout::to_string(std::ostream &str)
+{
+    str << "VkDescriptorSetLayout " << (void *)descriptor_set_layout << " {";
+    str << " flags=0x" << std::hex << flags << std::dec;
+    str << " bindings=[";
+    for (auto &binding : bindings)
+    {
+        str << " {";
+        str << " binding=" << binding.binding;
+        str << " descriptorType=" << binding.descriptorType;
+        str << " descriptorCount=" << binding.descriptorCount;
+        str << " stageFlags=0x" << std::hex << binding.stageFlags << std::dec;
+        str << " immutableSamplers=[";
+        for (auto &sampler : binding.immutableSamplers)
+        {
+            str << " " << (void *)sampler;
+        }
+        str << " ]";
+        str << " }";
+    }
+    str << " ]";
+    str << " }";
+}
+
+void sync_pipeline_layout::to_string(std::ostream &str)
+{
+    str << "VkPipelineLayout " << (void *)pipeline_layout << " {";
+    str << " flags=0x" << std::hex << flags << std::dec;
+    str << " setLayouts=[";
+    for (auto &set : setLayouts)
+    {
+        str << " " << (void *)set;
+    }
+    str << " ]";
+    str << " pushConstantRanges=[";
+    for (auto &range : pushConstantRanges)
+    {
+        str << " {";
+        str << " stageFlags=0x" << std::hex << range.stageFlags << std::dec;
+        str << " offset=" << range.offset;
+        str << " size=" << range.size;
+        str << " }";
+    }
+    str << " ]";
+    str << " }";
+}
+
+void sync_graphics_pipeline::to_string(std::ostream &str)
+{
+    str << "VkPipeline " << (void *)pipeline << " {";
+    str << " flags=0x" << std::hex << flags << std::dec;
+    str << " stages=[";
+    for (auto &stage : stages)
+    {
+        str << " {";
+        str << " flags=0x" << std::hex << stage.flags << std::dec;
+        str << " stage=0x" << std::hex << stage.stage << std::dec;
+        str << " module=" << (void *)stage.module;
+        str << " name=\"" << stage.name << "\"";
+        str << " }";
+    }
+    str << " ]";
+    str << " ..."; // TODO
+    str << " layout=" << (void *)layout;
+    str << " renderPass=" << (void *)renderPass;
+    str << " subpass=" << subpass;
+    str << "}";
+}

@@ -57,6 +57,9 @@ public:
 
     virtual bool is_draw() const { return false; }
 
+    virtual bool update_pipeline_binding(VkPipeline *graphics, VkPipeline *compute) const { return false; }
+    // TODO: vkCmdExecuteCommands needs to implement this too, to set them to NULL
+
     virtual void to_string(std::ostream &str) = 0;
 };
 
@@ -72,6 +75,15 @@ public:
     }
 
     virtual void to_string(std::ostream &str) override;
+
+    virtual bool update_pipeline_binding(VkPipeline *graphics, VkPipeline *compute) const override
+    {
+        if (pipelineBindPoint == VK_PIPELINE_BIND_POINT_GRAPHICS)
+            *graphics = pipeline;
+        else if (pipelineBindPoint == VK_PIPELINE_BIND_POINT_COMPUTE)
+            *compute = pipeline;
+        return true;
+    }
 
     VkPipelineBindPoint pipelineBindPoint;
     VkPipeline pipeline;
@@ -390,6 +402,95 @@ struct sync_render_pass
 };
 
 /**
+ * Internal state for a VkDescriptorSetLayout.
+ */
+struct sync_descriptor_set_layout
+{
+    VkDescriptorSetLayout descriptor_set_layout;
+
+    struct descriptor_set_layout_binding
+    {
+        uint32_t binding;
+        VkDescriptorType descriptorType;
+        uint32_t descriptorCount;
+        VkShaderStageFlags stageFlags;
+        std::vector<VkSampler> immutableSamplers;
+    };
+
+    VkDescriptorSetLayoutCreateFlags flags;
+    std::vector<descriptor_set_layout_binding> bindings;
+
+    void to_string(std::ostream &str);
+};
+
+/**
+ * Internal state for a VkPipelineLayout.
+ */
+struct sync_pipeline_layout
+{
+    VkPipelineLayout pipeline_layout;
+
+    VkPipelineLayoutCreateFlags flags;
+    std::vector<VkDescriptorSetLayout> setLayouts;
+    std::vector<VkPushConstantRange> pushConstantRanges;
+
+    void to_string(std::ostream &str);
+};
+
+/**
+ * Internal state for a graphics VkPipeline.
+ */
+struct sync_graphics_pipeline
+{
+    VkPipeline pipeline;
+
+    struct shader_stage
+    {
+        VkPipelineShaderStageCreateFlags flags;
+        VkShaderStageFlagBits stage;
+        VkShaderModule module;
+        std::string name;
+
+        // TODO:
+//         const VkSpecializationInfo*         pSpecializationInfo;
+    };
+
+    struct vertex_input_state
+    {
+        VkPipelineVertexInputStateCreateFlags flags;
+        std::vector<VkVertexInputBindingDescription> vertexBindingDescriptions;
+        std::vector<VkVertexInputAttributeDescription> vertexAttributeDescriptions;
+    };
+
+    struct input_assembly_state
+    {
+        VkPipelineInputAssemblyStateCreateFlags flags;
+        VkPrimitiveTopology topology;
+        VkBool32 primitiveRestartEnable;
+    };
+
+    VkPipelineCreateFlags flags;
+    std::vector<shader_stage> stages;
+    vertex_input_state vertexInputState;
+    input_assembly_state inputAssemblyState;
+
+    // TODO:
+//     const VkPipelineTessellationStateCreateInfo*     pTessellationState;
+//     const VkPipelineViewportStateCreateInfo*         pViewportState;
+//     const VkPipelineRasterizationStateCreateInfo*    pRasterizationState;
+//     const VkPipelineMultisampleStateCreateInfo*      pMultisampleState;
+//     const VkPipelineDepthStencilStateCreateInfo*     pDepthStencilState;
+//     const VkPipelineColorBlendStateCreateInfo*       pColorBlendState;
+//     const VkPipelineDynamicStateCreateInfo*          pDynamicState;
+
+    VkPipelineLayout layout;
+    VkRenderPass renderPass;
+    uint32_t subpass;
+
+    void to_string(std::ostream &str);
+};
+
+/**
  * Internal state for a VkDevice.
  */
 struct sync_device
@@ -405,6 +506,12 @@ struct sync_device
     std::map<VkCommandBuffer, sync_command_buffer> command_buffers;
 
     std::map<VkRenderPass, sync_render_pass> render_passes;
+
+    std::map<VkDescriptorSetLayout, sync_descriptor_set_layout> descriptor_set_layouts;
+
+    std::map<VkPipelineLayout, sync_pipeline_layout> pipeline_layouts;
+
+    std::map<VkPipeline, sync_graphics_pipeline> graphics_pipelines;
 };
 
 #endif // INCLUDED_VULKAN_SYNC_H
