@@ -390,9 +390,56 @@ static bool dump_command_buffer(
     VkPipeline graphics_pipeline = VK_NULL_HANDLE;
     VkPipeline compute_pipeline = VK_NULL_HANDLE;
 
+    struct Binding
+    {
+        sync_descriptor_set *descriptor_set;
+        uint32_t dynamic_offset; // TODO
+    };
+
+    std::map<uint32_t, Binding> graphics_bindings;
+    std::map<uint32_t, Binding> compute_bindings;
+
     for (auto &cmd : buf.commands)
     {
-        cmd->update_pipeline_binding(&graphics_pipeline, &compute_pipeline);
+        // TODO: reset state on vkCmdExecuteCommands
+
+        auto bind_pipeline = cmd->as_bind_pipeline();
+        if (bind_pipeline)
+        {
+            if (bind_pipeline->pipelineBindPoint == VK_PIPELINE_BIND_POINT_GRAPHICS)
+                graphics_pipeline = bind_pipeline->pipeline;
+            else if (bind_pipeline->pipelineBindPoint == VK_PIPELINE_BIND_POINT_COMPUTE)
+                compute_pipeline = bind_pipeline->pipeline;
+        }
+
+        auto bind_descriptor_sets = cmd->as_bind_descriptor_sets();
+        if (bind_descriptor_sets)
+        {
+            // TODO: should look at pipeline layout compatibility here
+            // TODO: dynamic offsets
+
+            for (uint32_t i = 0; i < bind_descriptor_sets->descriptorSets.size(); ++i)
+            {
+                uint32_t set_number = bind_descriptor_sets->firstSet + i;
+
+                auto descriptor_set = device_data->sync.descriptor_sets.find(bind_descriptor_sets->descriptorSets[i]);
+                if (descriptor_set == device_data->sync.descriptor_sets.end())
+                {
+                    return LOG_ERROR(device_data, COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
+                        "Draw command called with unknown descriptor set bound");
+                }
+
+                Binding binding;
+                binding.descriptor_set = &descriptor_set->second;
+                binding.dynamic_offset = 0;
+
+                if (bind_descriptor_sets->pipelineBindPoint == VK_PIPELINE_BIND_POINT_GRAPHICS)
+                    graphics_bindings[set_number] = binding;
+                else if (bind_descriptor_sets->pipelineBindPoint == VK_PIPELINE_BIND_POINT_COMPUTE)
+                    compute_bindings[set_number] = binding;
+            }
+        }
+
         if (cmd->is_draw())
         {
             if (graphics_pipeline == VK_NULL_HANDLE)
@@ -433,6 +480,13 @@ static bool dump_command_buffer(
 
                 str << "\n        ";
                 set_layout->second.to_string(str);
+            }
+            str << "\n    Current bindings:\n";
+            for (auto &binding : graphics_bindings)
+            {
+                str << "      " << binding.first << ": ";
+                binding.second.descriptor_set->to_string(str);
+                str << "\n";
             }
 
             if (LOG_INFO(device_data, COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
@@ -856,14 +910,335 @@ LAYER_FN(void) vkDestroyDescriptorSetLayout(
     device_data->dispatch.DestroyDescriptorSetLayout(device, descriptorSetLayout, pAllocator);
 }
 
-// LAYER_FN(VkResult) vkCreateDescriptorPool(VkDevice device, const VkDescriptorPoolCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkDescriptorPool* pDescriptorPool);
-// LAYER_FN(void) vkDestroyDescriptorPool(VkDevice device, VkDescriptorPool descriptorPool, const VkAllocationCallbacks* pAllocator);
-// LAYER_FN(VkResult) vkResetDescriptorPool(VkDevice device, VkDescriptorPool descriptorPool, VkDescriptorPoolResetFlags flags);
-//
-// LAYER_FN(VkResult) vkAllocateDescriptorSets(VkDevice device, const VkDescriptorSetAllocateInfo* pAllocateInfo, VkDescriptorSet* pDescriptorSets);
-// LAYER_FN(VkResult) vkFreeDescriptorSets(VkDevice device, VkDescriptorPool descriptorPool, uint32_t descriptorSetCount, const VkDescriptorSet* pDescriptorSets);
-// LAYER_FN(void) vkUpdateDescriptorSets(VkDevice device, uint32_t descriptorWriteCount, const VkWriteDescriptorSet* pDescriptorWrites, uint32_t descriptorCopyCount, const VkCopyDescriptorSet* pDescriptorCopies);
-//
+LAYER_FN(VkResult) vkCreateDescriptorPool(
+    VkDevice device,
+    const VkDescriptorPoolCreateInfo *pCreateInfo,
+    const VkAllocationCallbacks *pAllocator,
+    VkDescriptorPool *pDescriptorPool)
+{
+    auto device_data = get_layer_device_data(device);
+
+    if (LOG_DEBUG(device_data, DEVICE, device, SYNC_MSG_NONE, __FUNCTION__))
+        return VK_ERROR_VALIDATION_FAILED_EXT;
+
+    VkResult result = device_data->dispatch.CreateDescriptorPool(device, pCreateInfo, pAllocator, pDescriptorPool);
+    if (result != VK_SUCCESS)
+        return result;
+
+    {
+        std::lock_guard<std::mutex> lock(device_data->sync_mutex);
+
+        sync_descriptor_pool descriptor_pool;
+        descriptor_pool.descriptor_pool = *pDescriptorPool;
+
+        bool inserted = device_data->sync.descriptor_pools.insert(std::make_pair(
+            *pDescriptorPool,
+            descriptor_pool
+        )).second;
+
+        if (!inserted)
+        {
+            if (LOG_ERROR(device_data, DESCRIPTOR_POOL, *pDescriptorPool, SYNC_MSG_INTERNAL_ERROR,
+                    "Internal error in vkCreateDescriptorPool: new pool already exists"))
+                return VK_ERROR_VALIDATION_FAILED_EXT;
+        }
+    }
+
+    return result;
+}
+
+LAYER_FN(void) vkDestroyDescriptorPool(
+    VkDevice device,
+    VkDescriptorPool descriptorPool,
+    const VkAllocationCallbacks *pAllocator)
+{
+    auto device_data = get_layer_device_data(device);
+
+    if (LOG_DEBUG(device_data, DESCRIPTOR_POOL, descriptorPool, SYNC_MSG_NONE, __FUNCTION__))
+        return;
+
+    {
+        std::lock_guard<std::mutex> lock(device_data->sync_mutex);
+
+        auto it = device_data->sync.descriptor_pools.find(descriptorPool);
+        if (it == device_data->sync.descriptor_pools.end())
+        {
+            if (LOG_ERROR(device_data, DESCRIPTOR_POOL, descriptorPool, SYNC_MSG_INVALID_PARAM,
+                    "vkDestroyDescriptorPool called with unknown descriptorPool"))
+                return;
+        }
+        else
+        {
+            // Remove the device's state for all the sets in this pool
+            for (auto descriptor_set : it->second.descriptor_sets)
+            {
+                size_t removed = device_data->sync.descriptor_sets.erase(descriptor_set);
+                assert(removed == 1);
+            }
+
+            // Remove the device's state for this pool
+            device_data->sync.descriptor_pools.erase(it);
+        }
+    }
+
+    device_data->dispatch.DestroyDescriptorPool(device, descriptorPool, pAllocator);
+}
+
+LAYER_FN(VkResult) vkResetDescriptorPool(
+    VkDevice device,
+    VkDescriptorPool descriptorPool,
+    VkDescriptorPoolResetFlags flags)
+{
+    auto device_data = get_layer_device_data(device);
+
+    if (LOG_DEBUG(device_data, DESCRIPTOR_POOL, descriptorPool, SYNC_MSG_NONE, __FUNCTION__))
+        return VK_ERROR_VALIDATION_FAILED_EXT;
+
+    {
+        std::lock_guard<std::mutex> lock(device_data->sync_mutex);
+
+        auto it = device_data->sync.descriptor_pools.find(descriptorPool);
+        if (it == device_data->sync.descriptor_pools.end())
+        {
+            if (LOG_ERROR(device_data, DESCRIPTOR_POOL, descriptorPool, SYNC_MSG_INVALID_PARAM,
+                    "vkResetDescriptorPool called with unknown descriptorPool"))
+                return VK_ERROR_VALIDATION_FAILED_EXT;
+        }
+        else
+        {
+            // Remove the device's state for all the sets in this pool
+            for (auto descriptor_set : it->second.descriptor_sets)
+            {
+                size_t removed = device_data->sync.descriptor_sets.erase(descriptor_set);
+                assert(removed == 1);
+            }
+        }
+    }
+
+    return device_data->dispatch.ResetDescriptorPool(device, descriptorPool, flags);
+}
+
+LAYER_FN(VkResult) vkAllocateDescriptorSets(
+    VkDevice device,
+    const VkDescriptorSetAllocateInfo *pAllocateInfo,
+    VkDescriptorSet *pDescriptorSets)
+{
+    auto device_data = get_layer_device_data(device);
+
+    if (LOG_DEBUG(device_data, DESCRIPTOR_POOL, pAllocateInfo->descriptorPool, SYNC_MSG_NONE, __FUNCTION__))
+        return VK_ERROR_VALIDATION_FAILED_EXT;
+
+    VkResult result = device_data->dispatch.AllocateDescriptorSets(device, pAllocateInfo, pDescriptorSets);
+    if (result != VK_SUCCESS)
+        return result;
+
+    {
+        std::lock_guard<std::mutex> lock(device_data->sync_mutex);
+
+        auto it = device_data->sync.descriptor_pools.find(pAllocateInfo->descriptorPool);
+        if (it == device_data->sync.descriptor_pools.end())
+        {
+            if (LOG_ERROR(device_data, DESCRIPTOR_POOL, pAllocateInfo->descriptorPool, SYNC_MSG_INVALID_PARAM,
+                    "vkAllocateDescriptorSets called with unknown descriptorPool"))
+                return VK_ERROR_VALIDATION_FAILED_EXT;
+        }
+        else
+        {
+            for (uint32_t i = 0; i < pAllocateInfo->descriptorSetCount; ++i)
+            {
+                sync_descriptor_set descriptor_set;
+
+                descriptor_set.descriptor_set = pDescriptorSets[i];
+                descriptor_set.descriptor_pool = pAllocateInfo->descriptorPool;
+                descriptor_set.setLayout = pAllocateInfo->pSetLayouts[i];
+
+                auto layout = device_data->sync.descriptor_set_layouts.find(pAllocateInfo->pSetLayouts[i]);
+                if (layout == device_data->sync.descriptor_set_layouts.end())
+                {
+                    if (LOG_ERROR(device_data, DESCRIPTOR_POOL, pAllocateInfo->descriptorPool, SYNC_MSG_INVALID_PARAM,
+                            "vkAllocateDescriptorSets called with unknown pSetLayouts[%d]", i))
+                        return VK_ERROR_VALIDATION_FAILED_EXT;
+                    else
+                        continue;
+                }
+
+                for (auto &layout_binding : layout->second.bindings)
+                {
+                    auto &binding = descriptor_set.bindings[layout_binding.binding];
+                    binding.descriptorType = layout_binding.descriptorType;
+                    binding.descriptors.resize(layout_binding.descriptorCount);
+                    for (auto &d : binding.descriptors)
+                        d.valid = false;
+                }
+
+                bool inserted;
+
+                // Add into the global list of sets
+                inserted = device_data->sync.descriptor_sets.insert(std::make_pair(
+                    pDescriptorSets[i],
+                    std::move(descriptor_set)
+                )).second;
+                if (!inserted)
+                {
+                    if (LOG_ERROR(device_data, DESCRIPTOR_SET, pDescriptorSets[i], SYNC_MSG_INTERNAL_ERROR,
+                            "Internal error in vkAllocateDescriptorSets: new set already exists"))
+                        result = VK_ERROR_VALIDATION_FAILED_EXT;
+                }
+
+                // Add into the pool's list of sets
+                inserted = it->second.descriptor_sets.insert(pDescriptorSets[i]).second;
+                assert(inserted);
+            }
+        }
+    }
+
+    return result;
+}
+
+LAYER_FN(VkResult) vkFreeDescriptorSets(
+    VkDevice device,
+    VkDescriptorPool descriptorPool,
+    uint32_t descriptorSetCount,
+    const VkDescriptorSet* pDescriptorSets)
+{
+    auto device_data = get_layer_device_data(device);
+
+    if (LOG_DEBUG(device_data, DESCRIPTOR_POOL, descriptorPool, SYNC_MSG_NONE, __FUNCTION__))
+        return VK_ERROR_VALIDATION_FAILED_EXT;
+
+    {
+        std::lock_guard<std::mutex> lock(device_data->sync_mutex);
+
+        auto it = device_data->sync.descriptor_pools.find(descriptorPool);
+        if (it == device_data->sync.descriptor_pools.end())
+        {
+            if (LOG_ERROR(device_data, DESCRIPTOR_POOL, descriptorPool, SYNC_MSG_INVALID_PARAM,
+                    "vkFreeDescriptorSets called with unknown descriptorPool"))
+                return VK_ERROR_VALIDATION_FAILED_EXT;
+        }
+        else
+        {
+            for (uint32_t i = 0; i < descriptorSetCount; ++i)
+            {
+                size_t removed;
+
+                // Remove from the pool's list of sets
+                removed = it->second.descriptor_sets.erase(pDescriptorSets[i]);
+                if (removed != 1)
+                {
+                    if (LOG_ERROR(device_data, DESCRIPTOR_SET, pDescriptorSets[i], SYNC_MSG_INVALID_PARAM,
+                            "vkFreeDescriptorSets called with unknown pDescriptorSets[%u]", i))
+                        return VK_ERROR_VALIDATION_FAILED_EXT;
+                }
+                else
+                {
+                    // Remove from the global list of sets
+                    removed = device_data->sync.descriptor_sets.erase(pDescriptorSets[i]);
+                    assert(removed == 1);
+                }
+            }
+        }
+    }
+
+    return device_data->dispatch.FreeDescriptorSets(device, descriptorPool, descriptorSetCount, pDescriptorSets);
+}
+
+LAYER_FN(void) vkUpdateDescriptorSets(
+    VkDevice device,
+    uint32_t descriptorWriteCount,
+    const VkWriteDescriptorSet *pDescriptorWrites,
+    uint32_t descriptorCopyCount,
+    const VkCopyDescriptorSet *pDescriptorCopies)
+{
+    auto device_data = get_layer_device_data(device);
+
+    if (LOG_DEBUG(device_data, DEVICE, device, SYNC_MSG_NONE, __FUNCTION__))
+        return;
+
+    for (uint32_t i = 0; i < descriptorWriteCount; ++i)
+    {
+        auto it = device_data->sync.descriptor_sets.find(pDescriptorWrites[i].dstSet);
+        if (it == device_data->sync.descriptor_sets.end())
+        {
+            if (LOG_ERROR(device_data, DESCRIPTOR_SET, pDescriptorWrites[i].dstSet, SYNC_MSG_INVALID_PARAM,
+                    "vkUpdateDescriptorSets called with unknown pDescriptorWrites[%u].dstSet", i))
+                return;
+        }
+
+        auto &bindings = it->second.bindings;
+
+        uint32_t binding_id = pDescriptorWrites[i].dstBinding;
+        uint32_t binding_element = pDescriptorWrites[i].dstArrayElement;
+        VkDescriptorType binding_type = pDescriptorWrites[i].descriptorType;
+
+        // TODO: should check descriptor type, initial array element, etc
+
+        // TODO: handle immutable samplers properly
+
+        for (uint32_t j = 0; j < pDescriptorWrites[i].descriptorCount; ++j)
+        {
+            while (true)
+            {
+                if (bindings.find(binding_id) == bindings.end())
+                {
+                    if (LOG_ERROR(device_data, DESCRIPTOR_SET, pDescriptorWrites[i].dstSet, SYNC_MSG_INVALID_PARAM,
+                            "vkUpdateDescriptorSets pDescriptorWrites[%u] trying to write binding number %u, which is not defined in the descriptor set layout", i, binding_id))
+                        return;
+                    else
+                        break;
+                }
+                else if (binding_element >= bindings.find(binding_id)->second.descriptors.size())
+                {
+                    // Overflow into the next binding
+                    // (TODO: check the type is still correct, etc)
+                    binding_id++;
+                    binding_element = 0;
+                    // Loop and try again (in case the next binding is not defined or has size 0)
+                    continue;
+                }
+                else
+                {
+                    auto &descriptor = bindings.find(binding_id)->second.descriptors[binding_element];
+                    switch (binding_type)
+                    {
+                    case VK_DESCRIPTOR_TYPE_SAMPLER:
+                    case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:
+                    case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
+                    case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
+                    case VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT:
+                        descriptor.imageInfo = pDescriptorWrites[i].pImageInfo[j];
+                        descriptor.valid = true;
+                        break;
+                    case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:
+                    case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:
+                        descriptor.bufferView = pDescriptorWrites[i].pTexelBufferView[j];
+                        descriptor.valid = true;
+                        break;
+                    case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
+                    case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
+                    case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC:
+                    case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC:
+                        descriptor.bufferInfo = pDescriptorWrites[i].pBufferInfo[j];
+                        descriptor.valid = true;
+                        break;
+                    default:
+                        // This should never happen
+                        descriptor.valid = false;
+                        break;
+                    }
+                    break;
+                }
+            }
+        }
+
+    }
+
+    // TODO: copies
+    assert(descriptorCopyCount == 0);
+
+    device_data->dispatch.UpdateDescriptorSets(device, descriptorWriteCount, pDescriptorWrites, descriptorCopyCount, pDescriptorCopies);
+}
+
 // LAYER_FN(VkResult) vkCreateFramebuffer(VkDevice device, const VkFramebufferCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkFramebuffer* pFramebuffer);
 // LAYER_FN(void) vkDestroyFramebuffer(VkDevice device, VkFramebuffer framebuffer, const VkAllocationCallbacks* pAllocator);
 
@@ -1008,7 +1383,7 @@ LAYER_FN(void) vkDestroyCommandPool(
         if (it == device_data->sync.command_pools.end())
         {
             if (LOG_ERROR(device_data, COMMAND_POOL, commandPool, SYNC_MSG_INVALID_PARAM,
-                "vkDestroyCommandPool called with unknown commandPool"))
+                    "vkDestroyCommandPool called with unknown commandPool"))
                 return;
         }
         else
@@ -1101,6 +1476,7 @@ LAYER_FN(VkResult) vkAllocateCommandBuffers(
 
                 bool inserted;
 
+                // Add into the global list of buffers
                 inserted = device_data->sync.command_buffers.insert(std::make_pair(
                     pCommandBuffers[i],
                     std::move(command_buffer)
@@ -1112,6 +1488,7 @@ LAYER_FN(VkResult) vkAllocateCommandBuffers(
                         result = VK_ERROR_VALIDATION_FAILED_EXT;
                 }
 
+                // Add into the pool's list of buffers
                 inserted = it->second.command_buffers.insert(pCommandBuffers[i]).second;
                 assert(inserted);
             }
@@ -1148,6 +1525,7 @@ LAYER_FN(void) vkFreeCommandBuffers(
             {
                 size_t removed;
 
+                // Remove from the pool's list of buffers
                 removed = it->second.command_buffers.erase(pCommandBuffers[i]);
                 if (removed != 1)
                 {
@@ -1157,6 +1535,7 @@ LAYER_FN(void) vkFreeCommandBuffers(
                 }
                 else
                 {
+                    // Remove from the global list of buffers
                     removed = device_data->sync.command_buffers.erase(pCommandBuffers[i]);
                     assert(removed == 1);
                 }
@@ -1627,14 +2006,14 @@ LAYER_FN(PFN_vkVoidFunction) vkGetDeviceProcAddr(VkDevice device, const char *fu
     X(vkCreateDescriptorSetLayout);
     X(vkDestroyDescriptorSetLayout);
 
-// X(vkCreateDescriptorPool);
-// X(vkDestroyDescriptorPool);
-// X(vkResetDescriptorPool);
-//
-// X(vkAllocateDescriptorSets);
-// X(vkFreeDescriptorSets);
-// X(vkUpdateDescriptorSets);
-//
+    X(vkCreateDescriptorPool);
+    X(vkDestroyDescriptorPool);
+    X(vkResetDescriptorPool);
+
+    X(vkAllocateDescriptorSets);
+    X(vkFreeDescriptorSets);
+    X(vkUpdateDescriptorSets);
+
 // X(vkCreateFramebuffer);
 // X(vkDestroyFramebuffer);
 

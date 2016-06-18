@@ -72,7 +72,20 @@ void sync_cmd_set_scissor::to_string(std::ostream &str)
 void sync_cmd_bind_descriptor_sets::to_string(std::ostream &str)
 {
     str << "vkCmdBindDescriptorSets {";
-    str << " ...";
+    str << " pipelineBindPoint=" << pipelineBindPoint;
+    str << " layout=" << (void *)layout;
+    str << " firstSet=" << firstSet;
+
+    str << " descriptorSets=[";
+    for (auto &set : descriptorSets)
+        str << " " << (void *)set;
+    str << " ]";
+
+    str << " dynamicOffsets=[";
+    for (auto &offset : dynamicOffsets)
+        str << " " << offset;
+    str << " ]";
+
     str << " }";
 }
 
@@ -212,6 +225,67 @@ void sync_cmd_end_render_pass::to_string(std::ostream &str)
     str << " }";
 }
 
+
+void sync_descriptor_set::to_string(std::ostream &str)
+{
+    str << "VkDescriptorSet " << (void *)descriptor_set << " {";
+    str << " descriptor_pool=" << (void *)descriptor_pool;
+    str << " setLayout=" << (void *)setLayout;
+    str << " bindings={";
+    for (auto &binding : bindings)
+    {
+        str << " " << binding.first << ": {";
+        str << " type=" << binding.second.descriptorType;
+        str << " descriptors=[";
+        for (auto &descriptor : binding.second.descriptors)
+        {
+            if (!descriptor.valid)
+            {
+                str << " invalid";
+            }
+            else
+            {
+                switch (binding.second.descriptorType)
+                {
+                case VK_DESCRIPTOR_TYPE_SAMPLER:
+                case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:
+                case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
+                case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
+                case VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT:
+                    str << " {";
+                    str << " sampler=" << (void *)descriptor.imageInfo.sampler;
+                    str << " imageView=" << (void *)descriptor.imageInfo.imageView;
+                    str << " imageLayout=" << descriptor.imageInfo.imageLayout;
+                    str << " }";
+                    break;
+                case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:
+                case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:
+                    str << " {";
+                    str << " bufferView=" << (void *)descriptor.bufferView;
+                    str << " }";
+                    break;
+                case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
+                case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
+                case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC:
+                case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC:
+                    str << " {";
+                    str << " buffer=" << (void *)descriptor.bufferInfo.buffer;
+                    str << " offset=" << descriptor.bufferInfo.offset;
+                    str << " range=" << descriptor.bufferInfo.range;
+                    str << " }";
+                    break;
+                default:
+                    str << " (INVALID TYPE)";
+                    break;
+                }
+            }
+        }
+        str << " ]";
+        str << " }";
+    }
+    str << " }";
+    str << " }";
+}
 
 void sync_descriptor_set_layout::to_string(std::ostream &str)
 {

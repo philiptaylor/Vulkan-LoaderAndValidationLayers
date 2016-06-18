@@ -31,6 +31,9 @@
 #include <vector>
 #include <memory>
 
+class sync_cmd_bind_pipeline;
+class sync_cmd_bind_descriptor_sets;
+
 enum sync_msg
 {
     // General non-error messages
@@ -57,8 +60,8 @@ public:
 
     virtual bool is_draw() const { return false; }
 
-    virtual bool update_pipeline_binding(VkPipeline *graphics, VkPipeline *compute) const { return false; }
-    // TODO: vkCmdExecuteCommands needs to implement this too, to set them to NULL
+    virtual const sync_cmd_bind_pipeline *as_bind_pipeline() const { return nullptr; }
+    virtual const sync_cmd_bind_descriptor_sets *as_bind_descriptor_sets() const { return nullptr; }
 
     virtual void to_string(std::ostream &str) = 0;
 };
@@ -75,15 +78,7 @@ public:
     }
 
     virtual void to_string(std::ostream &str) override;
-
-    virtual bool update_pipeline_binding(VkPipeline *graphics, VkPipeline *compute) const override
-    {
-        if (pipelineBindPoint == VK_PIPELINE_BIND_POINT_GRAPHICS)
-            *graphics = pipeline;
-        else if (pipelineBindPoint == VK_PIPELINE_BIND_POINT_COMPUTE)
-            *compute = pipeline;
-        return true;
-    }
+    virtual const sync_cmd_bind_pipeline *as_bind_pipeline() const { return this; }
 
     VkPipelineBindPoint pipelineBindPoint;
     VkPipeline pipeline;
@@ -145,6 +140,7 @@ public:
     }
 
     virtual void to_string(std::ostream &str) override;
+    virtual const sync_cmd_bind_descriptor_sets *as_bind_descriptor_sets() const { return this; }
 
     VkPipelineBindPoint pipelineBindPoint;
     VkPipelineLayout layout;
@@ -373,8 +369,52 @@ struct sync_command_pool
 {
     VkCommandPool command_pool;
 
-    // All currently-existing VkCommandBuffers associated belonging to this pool
+    // All currently-existing VkCommandBuffers belonging to this pool
     std::set<VkCommandBuffer> command_buffers;
+};
+
+/**
+ * Internal state for a VkDescriptorSet.
+ */
+struct sync_descriptor_set
+{
+    sync_descriptor_set() { }
+
+    VkDescriptorSet descriptor_set;
+
+    struct descriptor
+    {
+        bool valid;
+        VkDescriptorImageInfo imageInfo;
+        VkDescriptorBufferInfo bufferInfo;
+        VkBufferView bufferView;
+    };
+
+    struct descriptor_array
+    {
+        VkDescriptorType descriptorType;
+        std::vector<descriptor> descriptors;
+    };
+
+    // Pool that this descriptor set belongs to
+    VkDescriptorPool descriptor_pool;
+
+    VkDescriptorSetLayout setLayout;
+
+    std::map<uint32_t, descriptor_array> bindings;
+
+    void to_string(std::ostream &str);
+};
+
+/**
+ * Internal state for a VkDescriptorPool.
+ */
+struct sync_descriptor_pool
+{
+    VkDescriptorPool descriptor_pool;
+
+    // All currently-existing VkDescriptorSets belonging to this pool
+    std::set<VkDescriptorSet> descriptor_sets;
 };
 
 /**
@@ -504,6 +544,14 @@ struct sync_device
     // This must remain in sync with command_pools[].command_buffers
     // (every command buffer belongs to a single pool)
     std::map<VkCommandBuffer, sync_command_buffer> command_buffers;
+
+    // All currently-existing VkDescriptorPools
+    std::map<VkDescriptorPool, sync_descriptor_pool> descriptor_pools;
+
+    // All currently-existing VkDescriptorSets.
+    // This must remain in sync with descriptor_pools[].descriptor_sets
+    // (every descriptor set belongs to a single pool)
+    std::map<VkDescriptorSet, sync_descriptor_set> descriptor_sets;
 
     std::map<VkRenderPass, sync_render_pass> render_passes;
 
