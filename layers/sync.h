@@ -478,6 +478,117 @@ struct sync_pipeline_layout
 };
 
 /**
+ * Internal state for a VkDeviceMemory.
+ */
+struct sync_device_memory
+{
+    VkDeviceMemory deviceMemory;
+
+    // VkMemoryAllocateInfo
+    VkDeviceSize allocationSize;
+    uint32_t memoryTypeIndex;
+
+    // vkMapMemory
+    bool isMapped;
+    VkDeviceSize mapOffset;
+    VkDeviceSize mapSize;
+    VkMemoryMapFlags mapFlags;
+    void *pMapData;
+
+    void to_string(std::ostream &str);
+};
+
+/**
+ * Internal state for a VkBuffer.
+ */
+struct sync_buffer
+{
+    VkBuffer buffer;
+
+    VkBufferCreateFlags flags;
+    VkDeviceSize size;
+    VkBufferUsageFlags usage;
+    VkSharingMode sharingMode;
+    std::vector<uint32_t> queueFamilyIndices;
+
+    // Got from vkGetBufferMemoryRequirements
+    VkMemoryRequirements memoryRequirements;
+
+    // Set by vkBindBufferMemory
+    VkDeviceMemory memory;
+    VkDeviceSize memoryOffset;
+
+    void to_string(std::ostream &str);
+};
+
+/**
+ * Internal state for a VkBufferView.
+ */
+struct sync_buffer_view
+{
+    VkBufferView buffer_view;
+
+    VkBufferViewCreateFlags flags;
+    VkBuffer buffer;
+    VkFormat format;
+    VkDeviceSize offset;
+    VkDeviceSize range;
+
+    void to_string(std::ostream &str);
+};
+
+/**
+ * Internal state for a VkImage.
+ */
+struct sync_image
+{
+    VkImage image;
+
+    VkImageCreateFlags flags;
+    VkImageType imageType;
+    VkFormat format;
+    VkExtent3D extent;
+    uint32_t mipLevels;
+    uint32_t arrayLayers;
+    VkSampleCountFlagBits samples;
+    VkImageTiling tiling;
+    VkImageUsageFlags usage;
+    VkSharingMode sharingMode;
+    std::vector<uint32_t> queueFamilyIndices;
+    VkImageLayout initialLayout;
+
+    // Got from vkGetImageMemoryRequirements
+    VkMemoryRequirements memoryRequirements;
+
+    // Subresource layouts indexed by (mipLevel, arrayLayer, aspectMask)
+    // (Only present if tiling=LINEAR)
+    std::vector<VkSubresourceLayout> subresourceLayouts;
+
+    // Set by vkBindImageMemory
+    VkDeviceMemory memory;
+    VkDeviceSize memoryOffset;
+
+    void to_string(std::ostream &str);
+};
+
+/**
+ * Internal state for a VkImageView.
+ */
+struct sync_image_view
+{
+    VkImageView image_view;
+
+    VkImageViewCreateFlags flags;
+    VkImage image;
+    VkImageViewType viewType;
+    VkFormat format;
+    VkComponentMapping components;
+    VkImageSubresourceRange subresourceRange;
+
+    void to_string(std::ostream &str);
+};
+
+/**
  * Internal state for a graphics VkPipeline.
  */
 struct sync_graphics_pipeline
@@ -558,6 +669,12 @@ struct sync_device
     std::map<VkDescriptorSetLayout, sync_descriptor_set_layout> descriptor_set_layouts;
 
     std::map<VkPipelineLayout, sync_pipeline_layout> pipeline_layouts;
+
+    std::map<VkDeviceMemory, sync_device_memory> device_memories;
+    std::map<VkBuffer, sync_buffer> buffers;
+    std::map<VkBufferView, sync_buffer_view> buffer_views;
+    std::map<VkImage, sync_image> images;
+    std::map<VkImageView, sync_image_view> image_views;
 
     std::map<VkPipeline, sync_graphics_pipeline> graphics_pipelines;
 };

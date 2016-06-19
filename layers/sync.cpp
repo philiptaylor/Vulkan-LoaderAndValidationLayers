@@ -455,8 +455,8 @@ static bool dump_command_buffer(
                     "Draw command called with unknown pipeline bound");
             }
 
-            auto layout = device_data->sync.pipeline_layouts.find(pipeline->second.layout);
-            if (layout == device_data->sync.pipeline_layouts.end())
+            auto pipeline_layout = device_data->sync.pipeline_layouts.find(pipeline->second.layout);
+            if (pipeline_layout == device_data->sync.pipeline_layouts.end())
             {
                 return LOG_ERROR(device_data, COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
                     "Draw command called with pipeline with unknown pipeline layout");
@@ -468,8 +468,8 @@ static bool dump_command_buffer(
             str << "\n    Current pipeline:\n      ";
             pipeline->second.to_string(str);
             str << "\n    Current pipeline layout:\n      ";
-            layout->second.to_string(str);
-            for (auto &setLayout : layout->second.setLayouts)
+            pipeline_layout->second.to_string(str);
+            for (auto &setLayout : pipeline_layout->second.setLayouts)
             {
                 auto set_layout = device_data->sync.descriptor_set_layouts.find(setLayout);
                 if (set_layout == device_data->sync.descriptor_set_layouts.end())
@@ -487,6 +487,207 @@ static bool dump_command_buffer(
                 str << "      " << binding.first << ": ";
                 binding.second.descriptor_set->to_string(str);
                 str << "\n";
+            }
+
+            str << "\n    Accessible memory:\n";
+            uint32_t set_idx = 0;
+            for (auto &set_layout : pipeline_layout->second.setLayouts)
+            {
+                auto layout = device_data->sync.descriptor_set_layouts.find(set_layout);
+                if (layout == device_data->sync.descriptor_set_layouts.end())
+                {
+                    return LOG_ERROR(device_data, COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
+                        "Draw command called with pipeline layout with unknown descriptor set layout");
+                }
+
+                auto current_binding = graphics_bindings.find(set_idx);
+                if (current_binding == graphics_bindings.end())
+                {
+                    return LOG_ERROR(device_data, COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
+                        "Draw command called with no descriptor set bound on set %u", set_idx);
+                }
+
+                uint32_t binding_idx = 0;
+                for (auto &binding : layout->second.bindings)
+                {
+                    auto current_descriptor = current_binding->second.descriptor_set->bindings.find(binding_idx);
+                    if (current_descriptor == current_binding->second.descriptor_set->bindings.end())
+                    {
+                        return LOG_ERROR(device_data, COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
+                            "Draw command called with no descriptor bound on set %u, binding %u", set_idx, binding_idx);
+                    }
+
+                    // TODO: should check this is compatible, valid, etc
+
+                    str << "      Set " << set_idx << ", binding " << binding_idx << ":\n";
+                    for (uint32_t array_idx = 0; array_idx < binding.descriptorCount; ++array_idx)
+                    {
+                        str << "        [" << array_idx << "]";
+                        switch (binding.descriptorType)
+                        {
+                        case VK_DESCRIPTOR_TYPE_SAMPLER:
+                        case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:
+                        case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
+                        case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
+                        case VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT:
+                        {
+                            auto &image_info = current_descriptor->second.descriptors.at(array_idx).imageInfo;
+                            auto image_view = device_data->sync.image_views.find(image_info.imageView);
+                            if (image_view == device_data->sync.image_views.end())
+                            {
+                                return LOG_ERROR(device_data, COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
+                                    "Draw command called with unknown image view on set %u, binding %u", set_idx, binding_idx);
+                            }
+                            auto image = device_data->sync.images.find(image_view->second.image);
+                            if (image == device_data->sync.images.end())
+                            {
+                                return LOG_ERROR(device_data, COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
+                                    "Draw command called with image view with unknown image on set %u, binding %u", set_idx, binding_idx);
+                            }
+                            auto memory = device_data->sync.device_memories.find(image->second.memory);
+                            if (memory == device_data->sync.device_memories.end())
+                            {
+                                return LOG_ERROR(device_data, COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
+                                    "Draw command called with image with unknown memory on set %u, binding %u", set_idx, binding_idx);
+                            }
+                            str << " memoryRequirements={";
+                            str << " size=" << image->second.memoryRequirements.size;
+                            str << " alignment=" << image->second.memoryRequirements.alignment;
+                            str << " memoryTypeBits=0x" << std::hex << image->second.memoryRequirements.memoryTypeBits << std::dec;
+                            str << " }";
+
+                            str << " memory=" << (void *)image->second.memory;
+                            str << " {";
+                            str << " allocationSize=" << memory->second.allocationSize;
+                            str << " memoryTypeIndex=" << memory->second.memoryTypeIndex;
+                            if (memory->second.isMapped)
+                            {
+                                str << " mapOffset=" << memory->second.mapOffset;
+                                str << " mapSize=" << memory->second.mapSize;
+                                str << " mapFlags=" << memory->second.mapFlags;
+                                str << " pMapData=" << memory->second.pMapData;
+                            }
+                            else
+                            {
+                                str << " unmapped";
+                            }
+                            str << " }";
+
+                            str << " memoryOffset=" << image->second.memoryOffset;
+                            str << " subresource={";
+                            str << " aspectMask=" << std::hex << image_view->second.subresourceRange.aspectMask << std::dec;
+                            str << " baseMipLevel=" << image_view->second.subresourceRange.baseMipLevel;
+                            str << " levelCount=" << image_view->second.subresourceRange.levelCount;
+                            str << " baseArrayLayer=" << image_view->second.subresourceRange.baseArrayLayer;
+                            str << " layerCount=" << image_view->second.subresourceRange.layerCount;
+                            str << " }";
+                            break;
+                        }
+                        case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:
+                        case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:
+                        {
+                            auto buffer_view = device_data->sync.buffer_views.find(current_descriptor->second.descriptors.at(array_idx).bufferView);
+                            if (buffer_view == device_data->sync.buffer_views.end())
+                            {
+                                return LOG_ERROR(device_data, COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
+                                    "Draw command called with unknown buffer view on set %u, binding %u", set_idx, binding_idx);
+                            }
+                            auto buffer = device_data->sync.buffers.find(buffer_view->second.buffer);
+                            if (buffer == device_data->sync.buffers.end())
+                            {
+                                return LOG_ERROR(device_data, COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
+                                    "Draw command called with buffer view with unknown buffer on set %u, binding %u", set_idx, binding_idx);
+                            }
+                            auto memory = device_data->sync.device_memories.find(buffer->second.memory);
+                            if (memory == device_data->sync.device_memories.end())
+                            {
+                                return LOG_ERROR(device_data, COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
+                                    "Draw command called with buffer with unknown memory on set %u, binding %u", set_idx, binding_idx);
+                            }
+                            str << " memoryRequirements={";
+                            str << " size=" << buffer->second.memoryRequirements.size;
+                            str << " alignment=" << buffer->second.memoryRequirements.alignment;
+                            str << " memoryTypeBits=0x" << std::hex << buffer->second.memoryRequirements.memoryTypeBits << std::dec;
+                            str << " }";
+
+                            str << " memory=" << (void *)buffer->second.memory;
+                            str << " {";
+                            str << " allocationSize=" << memory->second.allocationSize;
+                            str << " memoryTypeIndex=" << memory->second.memoryTypeIndex;
+                            if (memory->second.isMapped)
+                            {
+                                str << " mapOffset=" << memory->second.mapOffset;
+                                str << " mapSize=" << memory->second.mapSize;
+                                str << " mapFlags=" << memory->second.mapFlags;
+                                str << " pMapData=" << memory->second.pMapData;
+                            }
+                            else
+                            {
+                                str << " unmapped";
+                            }
+                            str << " }";
+
+                            str << " memoryOffset=" << buffer->second.memoryOffset;
+                            str << " size=" << buffer->second.size;
+                            str << " offset=" << buffer_view->second.offset;
+                            str << " range=" << buffer_view->second.range;
+                            break;
+                        }
+                        case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
+                        case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
+                        case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC:
+                        case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC:
+                        {
+                            auto &buffer_info = current_descriptor->second.descriptors.at(array_idx).bufferInfo;
+                            auto buffer = device_data->sync.buffers.find(buffer_info.buffer);
+                            if (buffer == device_data->sync.buffers.end())
+                            {
+                                return LOG_ERROR(device_data, COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
+                                    "Draw command called with unknown buffer on set %u, binding %u", set_idx, binding_idx);
+                            }
+                            auto memory = device_data->sync.device_memories.find(buffer->second.memory);
+                            if (memory == device_data->sync.device_memories.end())
+                            {
+                                return LOG_ERROR(device_data, COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
+                                    "Draw command called with buffer with unknown memory on set %u, binding %u", set_idx, binding_idx);
+                            }
+                            str << " memoryRequirements={";
+                            str << " size=" << buffer->second.memoryRequirements.size;
+                            str << " alignment=" << buffer->second.memoryRequirements.alignment;
+                            str << " memoryTypeBits=0x" << std::hex << buffer->second.memoryRequirements.memoryTypeBits << std::dec;
+                            str << " }";
+
+                            str << " memory=" << (void *)buffer->second.memory;
+                            str << " {";
+                            str << " allocationSize=" << memory->second.allocationSize;
+                            str << " memoryTypeIndex=" << memory->second.memoryTypeIndex;
+                            if (memory->second.isMapped)
+                            {
+                                str << " mapOffset=" << memory->second.mapOffset;
+                                str << " mapSize=" << memory->second.mapSize;
+                                str << " mapFlags=" << memory->second.mapFlags;
+                                str << " pMapData=" << memory->second.pMapData;
+                            }
+                            else
+                            {
+                                str << " unmapped";
+                            }
+                            str << " }";
+
+                            str << " memoryOffset=" << buffer->second.memoryOffset;
+                            str << " size=" << buffer->second.size;
+                            break;
+                        }
+                        default:
+                            str << " (INVALID TYPE)";
+                            break;
+                        }
+                        str << "\n";
+                    }
+                    ++binding_idx;
+                }
+
+                ++set_idx;
             }
 
             if (LOG_INFO(device_data, COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
@@ -577,15 +778,230 @@ LAYER_FN(VkResult) vkDeviceWaitIdle(
     return device_data->dispatch.DeviceWaitIdle(device);
 }
 
-// LAYER_FN(VkResult) vkAllocateMemory(VkDevice device, const VkMemoryAllocateInfo* pAllocateInfo, const VkAllocationCallbacks* pAllocator, VkDeviceMemory* pMemory);
-// LAYER_FN(void) vkFreeMemory(VkDevice device, VkDeviceMemory memory, const VkAllocationCallbacks* pAllocator);
-// LAYER_FN(VkResult) vkMapMemory(VkDevice device, VkDeviceMemory memory, VkDeviceSize offset, VkDeviceSize size, VkMemoryMapFlags flags, void** ppData);
-// LAYER_FN(void) vkUnmapMemory(VkDevice device, VkDeviceMemory memory);
-// LAYER_FN(VkResult) vkFlushMappedMemoryRanges(VkDevice device, uint32_t memoryRangeCount, const VkMappedMemoryRange* pMemoryRanges);
-// LAYER_FN(VkResult) vkInvalidateMappedMemoryRanges(VkDevice device, uint32_t memoryRangeCount, const VkMappedMemoryRange* pMemoryRanges);
-//
-// LAYER_FN(VkResult) vkBindBufferMemory(VkDevice device, VkBuffer buffer, VkDeviceMemory memory, VkDeviceSize memoryOffset);
-// LAYER_FN(VkResult) vkBindImageMemory(VkDevice device, VkImage image, VkDeviceMemory memory, VkDeviceSize memoryOffset);
+LAYER_FN(VkResult) vkAllocateMemory(
+    VkDevice device,
+    const VkMemoryAllocateInfo *pAllocateInfo,
+    const VkAllocationCallbacks *pAllocator,
+    VkDeviceMemory *pMemory)
+{
+    auto device_data = get_layer_device_data(device);
+
+    if (LOG_DEBUG(device_data, DEVICE, device, SYNC_MSG_NONE, __FUNCTION__))
+        return VK_ERROR_VALIDATION_FAILED_EXT;
+
+    VkResult result = device_data->dispatch.AllocateMemory(device, pAllocateInfo, pAllocator, pMemory);
+    if (result != VK_SUCCESS)
+        return result;
+
+    {
+        std::lock_guard<std::mutex> lock(device_data->sync_mutex);
+
+        sync_device_memory device_memory;
+        device_memory.deviceMemory = *pMemory;
+        device_memory.allocationSize = pAllocateInfo->allocationSize;
+        device_memory.memoryTypeIndex = pAllocateInfo->memoryTypeIndex;
+        device_memory.isMapped = false;
+
+        bool inserted = device_data->sync.device_memories.insert(std::make_pair(
+            *pMemory,
+            device_memory
+        )).second;
+
+        if (!inserted)
+        {
+            if (LOG_ERROR(device_data, DEVICE_MEMORY, *pMemory, SYNC_MSG_INTERNAL_ERROR,
+                "Internal error in vkAllocateMemory: new memory already exists"))
+                return VK_ERROR_VALIDATION_FAILED_EXT;
+        }
+    }
+
+    return result;
+}
+
+LAYER_FN(void) vkFreeMemory(
+    VkDevice device,
+    VkDeviceMemory memory,
+    const VkAllocationCallbacks *pAllocator)
+{
+    auto device_data = get_layer_device_data(device);
+
+    if (LOG_DEBUG(device_data, DEVICE_MEMORY, memory, SYNC_MSG_NONE, __FUNCTION__))
+        return;
+
+    {
+        std::lock_guard<std::mutex> lock(device_data->sync_mutex);
+
+        auto it = device_data->sync.device_memories.find(memory);
+        if (it == device_data->sync.device_memories.end())
+        {
+            if (LOG_ERROR(device_data, DEVICE_MEMORY, memory, SYNC_MSG_INVALID_PARAM,
+                    "vkFreeMemory called with unknown memory"))
+                return;
+        }
+        else
+        {
+            device_data->sync.device_memories.erase(it);
+        }
+    }
+
+    device_data->dispatch.FreeMemory(device, memory, pAllocator);
+}
+
+LAYER_FN(VkResult) vkMapMemory(
+    VkDevice device,
+    VkDeviceMemory memory,
+    VkDeviceSize offset,
+    VkDeviceSize size,
+    VkMemoryMapFlags flags,
+    void **ppData)
+{
+    auto device_data = get_layer_device_data(device);
+
+    if (LOG_DEBUG(device_data, DEVICE, device, SYNC_MSG_NONE, __FUNCTION__))
+        return VK_ERROR_VALIDATION_FAILED_EXT;
+
+    VkResult result = device_data->dispatch.MapMemory(device, memory, offset, size, flags, ppData);
+    if (result != VK_SUCCESS)
+        return result;
+
+    {
+        std::lock_guard<std::mutex> lock(device_data->sync_mutex);
+
+        auto it = device_data->sync.device_memories.find(memory);
+        if (it == device_data->sync.device_memories.end())
+        {
+            if (LOG_ERROR(device_data, DEVICE_MEMORY, memory, SYNC_MSG_INVALID_PARAM,
+                    "vkMapMemory called with unknown memory"))
+                return VK_ERROR_VALIDATION_FAILED_EXT;
+        }
+        else
+        {
+            it->second.isMapped = true;
+            it->second.mapOffset = offset;
+            it->second.mapSize = size;
+            it->second.mapFlags = flags;
+            it->second.pMapData = *ppData;
+        }
+    }
+
+    return result;
+}
+
+LAYER_FN(void) vkUnmapMemory(
+    VkDevice device,
+    VkDeviceMemory memory)
+{
+    auto device_data = get_layer_device_data(device);
+
+    if (LOG_DEBUG(device_data, DEVICE, device, SYNC_MSG_NONE, __FUNCTION__))
+        return;
+
+    {
+        std::lock_guard<std::mutex> lock(device_data->sync_mutex);
+
+        auto it = device_data->sync.device_memories.find(memory);
+        if (it == device_data->sync.device_memories.end())
+        {
+            if (LOG_ERROR(device_data, DEVICE_MEMORY, memory, SYNC_MSG_INVALID_PARAM,
+                    "vkUnmapMemory called with unknown memory"))
+                return;
+        }
+        else
+        {
+            it->second.isMapped = false;
+        }
+    }
+
+    device_data->dispatch.UnmapMemory(device, memory);
+}
+
+LAYER_FN(VkResult) vkFlushMappedMemoryRanges(
+    VkDevice device,
+    uint32_t memoryRangeCount,
+    const VkMappedMemoryRange *pMemoryRanges)
+{
+    auto device_data = get_layer_device_data(device);
+
+    if (LOG_DEBUG(device_data, DEVICE, device, SYNC_MSG_NONE, __FUNCTION__))
+        return VK_ERROR_VALIDATION_FAILED_EXT;
+
+    return device_data->dispatch.FlushMappedMemoryRanges(device, memoryRangeCount, pMemoryRanges);
+}
+
+LAYER_FN(VkResult) vkInvalidateMappedMemoryRanges(
+    VkDevice device,
+    uint32_t memoryRangeCount,
+    const VkMappedMemoryRange *pMemoryRanges)
+{
+    auto device_data = get_layer_device_data(device);
+
+    if (LOG_DEBUG(device_data, DEVICE, device, SYNC_MSG_NONE, __FUNCTION__))
+        return VK_ERROR_VALIDATION_FAILED_EXT;
+
+    return device_data->dispatch.InvalidateMappedMemoryRanges(device, memoryRangeCount, pMemoryRanges);
+}
+
+LAYER_FN(VkResult) vkBindBufferMemory(
+    VkDevice device,
+    VkBuffer buffer,
+    VkDeviceMemory memory,
+    VkDeviceSize memoryOffset)
+{
+    auto device_data = get_layer_device_data(device);
+
+    if (LOG_DEBUG(device_data, BUFFER, buffer, SYNC_MSG_NONE, __FUNCTION__))
+        return VK_ERROR_VALIDATION_FAILED_EXT;
+
+    {
+        std::lock_guard<std::mutex> lock(device_data->sync_mutex);
+
+        auto it = device_data->sync.buffers.find(buffer);
+        if (it == device_data->sync.buffers.end())
+        {
+            if (LOG_ERROR(device_data, BUFFER, buffer, SYNC_MSG_INVALID_PARAM,
+                    "vkBindBufferMemory called with unknown buffer"))
+                return VK_ERROR_VALIDATION_FAILED_EXT;
+        }
+        else
+        {
+            it->second.memory = memory;
+            it->second.memoryOffset = memoryOffset;
+        }
+    }
+
+    return device_data->dispatch.BindBufferMemory(device, buffer, memory, memoryOffset);
+}
+
+LAYER_FN(VkResult) vkBindImageMemory(
+    VkDevice device,
+    VkImage image,
+    VkDeviceMemory memory,
+    VkDeviceSize memoryOffset)
+{
+    auto device_data = get_layer_device_data(device);
+
+    if (LOG_DEBUG(device_data, IMAGE, image, SYNC_MSG_NONE, __FUNCTION__))
+        return VK_ERROR_VALIDATION_FAILED_EXT;
+
+    {
+        std::lock_guard<std::mutex> lock(device_data->sync_mutex);
+
+        auto it = device_data->sync.images.find(image);
+        if (it == device_data->sync.images.end())
+        {
+            if (LOG_ERROR(device_data, IMAGE, image, SYNC_MSG_INVALID_PARAM,
+                    "vkBindImageMemory called with unknown image"))
+                return VK_ERROR_VALIDATION_FAILED_EXT;
+        }
+        else
+        {
+            it->second.memory = memory;
+            it->second.memoryOffset = memoryOffset;
+        }
+    }
+
+    return device_data->dispatch.BindImageMemory(device, image, memory, memoryOffset);
+}
 
 // LAYER_FN(VkResult) vkQueueBindSparse(VkQueue queue, uint32_t bindInfoCount, const VkBindSparseInfo* pBindInfo, VkFence fence);
 // LAYER_FN(VkResult) vkCreateFence(VkDevice device, const VkFenceCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkFence* pFence);
@@ -630,19 +1046,341 @@ LAYER_FN(void) vkDestroySemaphore(
 // LAYER_FN(VkResult) vkCreateQueryPool(VkDevice device, const VkQueryPoolCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkQueryPool* pQueryPool);
 // LAYER_FN(void) vkDestroyQueryPool(VkDevice device, VkQueryPool queryPool, const VkAllocationCallbacks* pAllocator);
 // LAYER_FN(VkResult) vkGetQueryPoolResults(VkDevice device, VkQueryPool queryPool, uint32_t firstQuery, uint32_t queryCount, size_t dataSize, void* pData, VkDeviceSize stride, VkQueryResultFlags flags);
-//
-// LAYER_FN(VkResult) vkCreateBuffer(VkDevice device, const VkBufferCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkBuffer* pBuffer);
-// LAYER_FN(void) vkDestroyBuffer(VkDevice device, VkBuffer buffer, const VkAllocationCallbacks* pAllocator);
-//
-// LAYER_FN(VkResult) vkCreateBufferView(VkDevice device, const VkBufferViewCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkBufferView* pView);
-// LAYER_FN(void) vkDestroyBufferView(VkDevice device, VkBufferView bufferView, const VkAllocationCallbacks* pAllocator);
-//
-// LAYER_FN(VkResult) vkCreateImage(VkDevice device, const VkImageCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkImage* pImage);
-// LAYER_FN(void) vkDestroyImage(VkDevice device, VkImage image, const VkAllocationCallbacks* pAllocator);
-//
-// LAYER_FN(VkResult) vkCreateImageView(VkDevice device, const VkImageViewCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkImageView* pView);
-// LAYER_FN(void) vkDestroyImageView(VkDevice device, VkImageView imageView, const VkAllocationCallbacks* pAllocator);
-//
+
+LAYER_FN(VkResult) vkCreateBuffer(
+    VkDevice device,
+    const VkBufferCreateInfo *pCreateInfo,
+    const VkAllocationCallbacks *pAllocator,
+    VkBuffer *pBuffer)
+{
+    auto device_data = get_layer_device_data(device);
+
+    if (LOG_DEBUG(device_data, DEVICE, device, SYNC_MSG_NONE, __FUNCTION__))
+        return VK_ERROR_VALIDATION_FAILED_EXT;
+
+    VkResult result = device_data->dispatch.CreateBuffer(device, pCreateInfo, pAllocator, pBuffer);
+    if (result != VK_SUCCESS)
+        return result;
+
+    {
+        std::lock_guard<std::mutex> lock(device_data->sync_mutex);
+
+        sync_buffer buffer;
+        buffer.buffer = *pBuffer;
+        buffer.flags = pCreateInfo->flags;
+        buffer.size = pCreateInfo->size;
+        buffer.usage = pCreateInfo->usage;
+        buffer.sharingMode = pCreateInfo->sharingMode;
+        buffer.queueFamilyIndices = std::vector<uint32_t>(
+            pCreateInfo->pQueueFamilyIndices,
+            pCreateInfo->pQueueFamilyIndices + pCreateInfo->queueFamilyIndexCount
+        );
+
+        device_data->dispatch.GetBufferMemoryRequirements(device, *pBuffer, &buffer.memoryRequirements);
+
+        bool inserted = device_data->sync.buffers.insert(std::make_pair(
+            *pBuffer,
+            buffer
+        )).second;
+
+        if (!inserted)
+        {
+            if (LOG_ERROR(device_data, BUFFER, *pBuffer, SYNC_MSG_INTERNAL_ERROR,
+                    "Internal error in vkCreateBuffer: new buffer already exists"))
+                return VK_ERROR_VALIDATION_FAILED_EXT;
+        }
+    }
+
+    return result;
+}
+
+LAYER_FN(void) vkDestroyBuffer(
+    VkDevice device,
+    VkBuffer buffer,
+    const VkAllocationCallbacks *pAllocator)
+{
+    auto device_data = get_layer_device_data(device);
+
+    if (LOG_DEBUG(device_data, BUFFER, buffer, SYNC_MSG_NONE, __FUNCTION__))
+        return;
+
+    {
+        std::lock_guard<std::mutex> lock(device_data->sync_mutex);
+
+        auto it = device_data->sync.buffers.find(buffer);
+        if (it == device_data->sync.buffers.end())
+        {
+            if (LOG_ERROR(device_data, BUFFER, buffer, SYNC_MSG_INVALID_PARAM,
+                    "vkDestroyBuffer called with unknown buffer"))
+                return;
+        }
+        else
+        {
+            device_data->sync.buffers.erase(it);
+        }
+    }
+
+    device_data->dispatch.DestroyBuffer(device, buffer, pAllocator);
+}
+
+LAYER_FN(VkResult) vkCreateBufferView(
+    VkDevice device,
+    const VkBufferViewCreateInfo *pCreateInfo,
+    const VkAllocationCallbacks *pAllocator,
+    VkBufferView *pView)
+{
+    auto device_data = get_layer_device_data(device);
+
+    if (LOG_DEBUG(device_data, DEVICE, device, SYNC_MSG_NONE, __FUNCTION__))
+        return VK_ERROR_VALIDATION_FAILED_EXT;
+
+    VkResult result = device_data->dispatch.CreateBufferView(device, pCreateInfo, pAllocator, pView);
+    if (result != VK_SUCCESS)
+        return result;
+
+    {
+        std::lock_guard<std::mutex> lock(device_data->sync_mutex);
+
+        sync_buffer_view buffer_view;
+        buffer_view.buffer_view = *pView;
+        buffer_view.flags = pCreateInfo->flags;
+        buffer_view.buffer = pCreateInfo->buffer;
+        buffer_view.format = pCreateInfo->format;
+        buffer_view.offset = pCreateInfo->offset;
+        buffer_view.range = pCreateInfo->range;
+
+        bool inserted = device_data->sync.buffer_views.insert(std::make_pair(
+            *pView,
+            buffer_view
+        )).second;
+
+        if (!inserted)
+        {
+            if (LOG_ERROR(device_data, BUFFER_VIEW, *pView, SYNC_MSG_INTERNAL_ERROR,
+                    "Internal error in vkCreateBufferView: new buffer view already exists"))
+                return VK_ERROR_VALIDATION_FAILED_EXT;
+        }
+    }
+
+    return result;
+}
+
+LAYER_FN(void) vkDestroyBufferView(
+    VkDevice device,
+    VkBufferView bufferView,
+    const VkAllocationCallbacks *pAllocator)
+{
+    auto device_data = get_layer_device_data(device);
+
+    if (LOG_DEBUG(device_data, BUFFER_VIEW, bufferView, SYNC_MSG_NONE, __FUNCTION__))
+        return;
+
+    {
+        std::lock_guard<std::mutex> lock(device_data->sync_mutex);
+
+        auto it = device_data->sync.buffer_views.find(bufferView);
+        if (it == device_data->sync.buffer_views.end())
+        {
+            if (LOG_ERROR(device_data, BUFFER_VIEW, bufferView, SYNC_MSG_INVALID_PARAM,
+                    "vkDestroyBufferView called with unknown bufferView"))
+                return;
+        }
+        else
+        {
+            device_data->sync.buffer_views.erase(it);
+        }
+    }
+
+    device_data->dispatch.DestroyBufferView(device, bufferView, pAllocator);
+}
+
+LAYER_FN(VkResult) vkCreateImage(
+    VkDevice device,
+    const VkImageCreateInfo *pCreateInfo,
+    const VkAllocationCallbacks *pAllocator,
+    VkImage *pImage)
+{
+    auto device_data = get_layer_device_data(device);
+
+    if (LOG_DEBUG(device_data, DEVICE, device, SYNC_MSG_NONE, __FUNCTION__))
+        return VK_ERROR_VALIDATION_FAILED_EXT;
+
+    VkResult result = device_data->dispatch.CreateImage(device, pCreateInfo, pAllocator, pImage);
+    if (result != VK_SUCCESS)
+        return result;
+
+    {
+        std::lock_guard<std::mutex> lock(device_data->sync_mutex);
+
+        sync_image image;
+        image.image = *pImage;
+        image.flags = pCreateInfo->flags;
+        image.imageType = pCreateInfo->imageType;
+        image.format = pCreateInfo->format;
+        image.extent = pCreateInfo->extent;
+        image.mipLevels = pCreateInfo->mipLevels;
+        image.arrayLayers = pCreateInfo->arrayLayers;
+        image.samples = pCreateInfo->samples;
+        image.tiling = pCreateInfo->tiling;
+        image.usage = pCreateInfo->usage;
+        image.sharingMode = pCreateInfo->sharingMode;
+        image.queueFamilyIndices = std::vector<uint32_t>(
+            pCreateInfo->pQueueFamilyIndices,
+            pCreateInfo->pQueueFamilyIndices + pCreateInfo->queueFamilyIndexCount
+        );
+        image.initialLayout = pCreateInfo->initialLayout;
+
+        device_data->dispatch.GetImageMemoryRequirements(device, *pImage, &image.memoryRequirements);
+
+        // For linear images, query the subresource layout
+        if (image.tiling == VK_IMAGE_TILING_LINEAR)
+        {
+            VkImageSubresource subresource;
+            VkSubresourceLayout layout;
+
+            for (subresource.mipLevel = 0; subresource.mipLevel < image.mipLevels; ++subresource.mipLevel)
+            {
+                for (subresource.arrayLayer = 0; subresource.arrayLayer < image.arrayLayers; ++subresource.arrayLayer)
+                {
+                    if (vk_format_is_depth_or_stencil(image.format))
+                    {
+                        subresource.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+                        device_data->dispatch.GetImageSubresourceLayout(device, *pImage, &subresource, &layout);
+                        image.subresourceLayouts.push_back(layout);
+
+                        subresource.aspectMask = VK_IMAGE_ASPECT_STENCIL_BIT;
+                        device_data->dispatch.GetImageSubresourceLayout(device, *pImage, &subresource, &layout);
+                        image.subresourceLayouts.push_back(layout);
+                    }
+                    else
+                    {
+                        subresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                        device_data->dispatch.GetImageSubresourceLayout(device, *pImage, &subresource, &layout);
+                        image.subresourceLayouts.push_back(layout);
+                    }
+                }
+            }
+        }
+
+        // TODO: handle sparse images
+
+        bool inserted = device_data->sync.images.insert(std::make_pair(
+            *pImage,
+            image
+        )).second;
+
+        if (!inserted)
+        {
+            if (LOG_ERROR(device_data, IMAGE, *pImage, SYNC_MSG_INTERNAL_ERROR,
+                    "Internal error in vkCreateImage: new image already exists"))
+                return VK_ERROR_VALIDATION_FAILED_EXT;
+        }
+    }
+
+    return result;
+}
+
+LAYER_FN(void) vkDestroyImage(
+    VkDevice device,
+    VkImage image,
+    const VkAllocationCallbacks *pAllocator)
+{
+    auto device_data = get_layer_device_data(device);
+
+    if (LOG_DEBUG(device_data, IMAGE, image, SYNC_MSG_NONE, __FUNCTION__))
+        return;
+
+    {
+        std::lock_guard<std::mutex> lock(device_data->sync_mutex);
+
+        auto it = device_data->sync.images.find(image);
+        if (it == device_data->sync.images.end())
+        {
+            if (LOG_ERROR(device_data, IMAGE, image, SYNC_MSG_INVALID_PARAM,
+                    "vkDestroyImage called with unknown image"))
+                return;
+        }
+        else
+        {
+            device_data->sync.images.erase(it);
+        }
+    }
+
+    device_data->dispatch.DestroyImage(device, image, pAllocator);
+}
+
+LAYER_FN(VkResult) vkCreateImageView(
+    VkDevice device,
+    const VkImageViewCreateInfo *pCreateInfo,
+    const VkAllocationCallbacks *pAllocator,
+    VkImageView *pView)
+{
+    auto device_data = get_layer_device_data(device);
+
+    if (LOG_DEBUG(device_data, DEVICE, device, SYNC_MSG_NONE, __FUNCTION__))
+        return VK_ERROR_VALIDATION_FAILED_EXT;
+
+    VkResult result = device_data->dispatch.CreateImageView(device, pCreateInfo, pAllocator, pView);
+    if (result != VK_SUCCESS)
+        return result;
+
+    {
+        std::lock_guard<std::mutex> lock(device_data->sync_mutex);
+
+        sync_image_view image_view;
+        image_view.image_view = *pView;
+        image_view.flags = pCreateInfo->flags;
+        image_view.image = pCreateInfo->image;
+        image_view.viewType = pCreateInfo->viewType;
+        image_view.format = pCreateInfo->format;
+        image_view.components = pCreateInfo->components;
+        image_view.subresourceRange = pCreateInfo->subresourceRange;
+
+        bool inserted = device_data->sync.image_views.insert(std::make_pair(
+            *pView,
+            image_view
+        )).second;
+
+        if (!inserted)
+        {
+            if (LOG_ERROR(device_data, IMAGE_VIEW, *pView, SYNC_MSG_INTERNAL_ERROR,
+                    "Internal error in vkCreateImageView: new image view already exists"))
+                return VK_ERROR_VALIDATION_FAILED_EXT;
+        }
+    }
+
+    return result;
+}
+
+LAYER_FN(void) vkDestroyImageView(
+    VkDevice device,
+    VkImageView imageView,
+    const VkAllocationCallbacks *pAllocator)
+{
+    auto device_data = get_layer_device_data(device);
+
+    if (LOG_DEBUG(device_data, IMAGE_VIEW, imageView, SYNC_MSG_NONE, __FUNCTION__))
+        return;
+
+    {
+        std::lock_guard<std::mutex> lock(device_data->sync_mutex);
+
+        auto it = device_data->sync.image_views.find(imageView);
+        if (it == device_data->sync.image_views.end())
+        {
+            if (LOG_ERROR(device_data, IMAGE_VIEW, imageView, SYNC_MSG_INVALID_PARAM,
+                    "vkDestroyImageView called with unknown imageView"))
+                return;
+        }
+        else
+        {
+            device_data->sync.image_views.erase(it);
+        }
+    }
+
+    device_data->dispatch.DestroyImageView(device, imageView, pAllocator);
+}
+
 // LAYER_FN(VkResult) vkCreateShaderModule(VkDevice device, const VkShaderModuleCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkShaderModule* pShaderModule);
 // LAYER_FN(void) vkDestroyShaderModule(VkDevice device, VkShaderModule shaderModule, const VkAllocationCallbacks* pAllocator);
 
@@ -1950,15 +2688,15 @@ LAYER_FN(PFN_vkVoidFunction) vkGetDeviceProcAddr(VkDevice device, const char *fu
     X(vkQueueWaitIdle);
     X(vkDeviceWaitIdle);
 
-// X(vkAllocateMemory);
-// X(vkFreeMemory);
-// X(vkMapMemory);
-// X(vkUnmapMemory);
-// X(vkFlushMappedMemoryRanges);
-// X(vkInvalidateMappedMemoryRanges);
-//
-// X(vkBindBufferMemory);
-// X(vkBindImageMemory);
+    X(vkAllocateMemory);
+    X(vkFreeMemory);
+    X(vkMapMemory);
+    X(vkUnmapMemory);
+    X(vkFlushMappedMemoryRanges);
+    X(vkInvalidateMappedMemoryRanges);
+
+    X(vkBindBufferMemory);
+    X(vkBindImageMemory);
 
 // X(vkQueueBindSparse);
 // X(vkCreateFence);
@@ -1977,19 +2715,19 @@ LAYER_FN(PFN_vkVoidFunction) vkGetDeviceProcAddr(VkDevice device, const char *fu
 // X(vkCreateQueryPool);
 // X(vkDestroyQueryPool);
 // X(vkGetQueryPoolResults);
-//
-// X(vkCreateBuffer);
-// X(vkDestroyBuffer);
-//
-// X(vkCreateBufferView);
-// X(vkDestroyBufferView);
-//
-// X(vkCreateImage);
-// X(vkDestroyImage);
-//
-// X(vkCreateImageView);
-// X(vkDestroyImageView);
-//
+
+    X(vkCreateBuffer);
+    X(vkDestroyBuffer);
+
+    X(vkCreateBufferView);
+    X(vkDestroyBufferView);
+
+    X(vkCreateImage);
+    X(vkDestroyImage);
+
+    X(vkCreateImageView);
+    X(vkDestroyImageView);
+
 // X(vkCreateShaderModule);
 // X(vkDestroyShaderModule);
 
