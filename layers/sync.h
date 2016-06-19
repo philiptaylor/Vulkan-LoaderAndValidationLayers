@@ -25,6 +25,7 @@
 
 #include "vk_loader_platform.h"
 #include "vk_layer.h"
+#include "vk_layer_logging.h"
 
 #include <map>
 #include <set>
@@ -33,6 +34,7 @@
 
 class sync_cmd_bind_pipeline;
 class sync_cmd_bind_descriptor_sets;
+class SyncValidator;
 
 enum sync_msg
 {
@@ -484,6 +486,10 @@ struct sync_device_memory
 {
     VkDeviceMemory deviceMemory;
 
+    // A globally-unique ID, used for tracking accesses to the same memory
+    // object during the device's lifetime
+    uint64_t uid;
+
     // VkMemoryAllocateInfo
     VkDeviceSize allocationSize;
     uint32_t memoryTypeIndex;
@@ -646,7 +652,7 @@ struct sync_graphics_pipeline
  */
 struct sync_device
 {
-    sync_device() { }
+    sync_device() : nextMemoryUid(0) { }
 
     // All currently-existing VkCommandPools
     std::map<VkCommandPool, sync_command_pool> command_pools;
@@ -677,6 +683,22 @@ struct sync_device
     std::map<VkImageView, sync_image_view> image_views;
 
     std::map<VkPipeline, sync_graphics_pipeline> graphics_pipelines;
+
+    uint64_t nextMemoryUid;
+
+    std::unique_ptr<SyncValidator> mSyncValidator;
+};
+
+class SyncValidator
+{
+public:
+    SyncValidator(sync_device &syncDevice, debug_report_data *reportData);
+
+    bool submitCmdBuffer(VkQueue queue, const sync_command_buffer &buf);
+
+private:
+    sync_device &mSyncDevice;
+    debug_report_data *mReportData;
 };
 
 #endif // INCLUDED_VULKAN_SYNC_H

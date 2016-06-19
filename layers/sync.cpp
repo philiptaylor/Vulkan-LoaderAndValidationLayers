@@ -51,6 +51,28 @@
  *    Complain that the DAG has race conditions
  */
 
+/*
+ * Initial tracking:
+ * 
+ * Construct an execution dependency DAG
+ * 
+ * Construct a collection of memory events (read, write, flush, invalidate) associated with DAG nodes
+ *
+ * For each event, do a graph search to every previous overlapping node, if any are not found then complain
+ *
+ *
+ * Tracking:
+ *   Assign each command a (queue_idx, subpass_idx or -1, idx_in_queue++)
+ *   That lets us compute sets of commands before & after a pipeline barrier,
+ *   possibly scoped to a subpass
+ *
+ *   Every vkCmdPipelineBarrier creates a bunch of nodes and edges,
+ *   plus we remember all active barriers so that subsequent commands
+ *   will add more edges
+ *
+ *
+ **/
+
 
 #include <unordered_map>
 #include <mutex>
@@ -314,6 +336,8 @@ LAYER_FN(VkResult) vkCreateDevice(
 
     device_data->report_data = layer_debug_report_create_device(instance_data->report_data, *pDevice);
 
+    device_data->sync.mSyncValidator = std::unique_ptr<SyncValidator>(new SyncValidator(device_data->sync, device_data->report_data));
+
     {
         std::lock_guard<std::mutex> lock(g_layer_map_mutex);
         bool inserted = g_layer_device_data_map.insert(std::make_pair(
@@ -382,324 +406,6 @@ LAYER_FN(void) vkDebugReportMessageEXT(
     instance_data->dispatch.DebugReportMessageEXT(instance, flags, objType, object, location, msgCode, pLayerPrefix, pMsg);
 }
 
-
-static bool dump_command_buffer(
-    layer_device_data *device_data,
-    sync_command_buffer &buf)
-{
-    VkPipeline graphics_pipeline = VK_NULL_HANDLE;
-    VkPipeline compute_pipeline = VK_NULL_HANDLE;
-
-    struct Binding
-    {
-        sync_descriptor_set *descriptor_set;
-        uint32_t dynamic_offset; // TODO
-    };
-
-    std::map<uint32_t, Binding> graphics_bindings;
-    std::map<uint32_t, Binding> compute_bindings;
-
-    for (auto &cmd : buf.commands)
-    {
-        // TODO: reset state on vkCmdExecuteCommands
-
-        auto bind_pipeline = cmd->as_bind_pipeline();
-        if (bind_pipeline)
-        {
-            if (bind_pipeline->pipelineBindPoint == VK_PIPELINE_BIND_POINT_GRAPHICS)
-                graphics_pipeline = bind_pipeline->pipeline;
-            else if (bind_pipeline->pipelineBindPoint == VK_PIPELINE_BIND_POINT_COMPUTE)
-                compute_pipeline = bind_pipeline->pipeline;
-        }
-
-        auto bind_descriptor_sets = cmd->as_bind_descriptor_sets();
-        if (bind_descriptor_sets)
-        {
-            // TODO: should look at pipeline layout compatibility here
-            // TODO: dynamic offsets
-
-            for (uint32_t i = 0; i < bind_descriptor_sets->descriptorSets.size(); ++i)
-            {
-                uint32_t set_number = bind_descriptor_sets->firstSet + i;
-
-                auto descriptor_set = device_data->sync.descriptor_sets.find(bind_descriptor_sets->descriptorSets[i]);
-                if (descriptor_set == device_data->sync.descriptor_sets.end())
-                {
-                    return LOG_ERROR(device_data, COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
-                        "Draw command called with unknown descriptor set bound");
-                }
-
-                Binding binding;
-                binding.descriptor_set = &descriptor_set->second;
-                binding.dynamic_offset = 0;
-
-                if (bind_descriptor_sets->pipelineBindPoint == VK_PIPELINE_BIND_POINT_GRAPHICS)
-                    graphics_bindings[set_number] = binding;
-                else if (bind_descriptor_sets->pipelineBindPoint == VK_PIPELINE_BIND_POINT_COMPUTE)
-                    compute_bindings[set_number] = binding;
-            }
-        }
-
-        if (cmd->is_draw())
-        {
-            if (graphics_pipeline == VK_NULL_HANDLE)
-            {
-                return LOG_ERROR(device_data, COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
-                    "Draw command called with no pipeline bound");
-            }
-
-            auto pipeline = device_data->sync.graphics_pipelines.find(graphics_pipeline);
-            if (pipeline == device_data->sync.graphics_pipelines.end())
-            {
-                return LOG_ERROR(device_data, COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
-                    "Draw command called with unknown pipeline bound");
-            }
-
-            auto pipeline_layout = device_data->sync.pipeline_layouts.find(pipeline->second.layout);
-            if (pipeline_layout == device_data->sync.pipeline_layouts.end())
-            {
-                return LOG_ERROR(device_data, COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
-                    "Draw command called with pipeline with unknown pipeline layout");
-            }
-
-            std::stringstream str;
-            str << "Draw command: ";
-            cmd->to_string(str);
-            str << "\n    Current pipeline:\n      ";
-            pipeline->second.to_string(str);
-            str << "\n    Current pipeline layout:\n      ";
-            pipeline_layout->second.to_string(str);
-            for (auto &setLayout : pipeline_layout->second.setLayouts)
-            {
-                auto set_layout = device_data->sync.descriptor_set_layouts.find(setLayout);
-                if (set_layout == device_data->sync.descriptor_set_layouts.end())
-                {
-                    return LOG_ERROR(device_data, COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
-                        "Draw command called with pipeline layout with unknown descriptor set layout");
-                }
-
-                str << "\n        ";
-                set_layout->second.to_string(str);
-            }
-            str << "\n    Current bindings:\n";
-            for (auto &binding : graphics_bindings)
-            {
-                str << "      " << binding.first << ": ";
-                binding.second.descriptor_set->to_string(str);
-                str << "\n";
-            }
-
-            str << "\n    Accessible memory:\n";
-            uint32_t set_idx = 0;
-            for (auto &set_layout : pipeline_layout->second.setLayouts)
-            {
-                auto layout = device_data->sync.descriptor_set_layouts.find(set_layout);
-                if (layout == device_data->sync.descriptor_set_layouts.end())
-                {
-                    return LOG_ERROR(device_data, COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
-                        "Draw command called with pipeline layout with unknown descriptor set layout");
-                }
-
-                auto current_binding = graphics_bindings.find(set_idx);
-                if (current_binding == graphics_bindings.end())
-                {
-                    return LOG_ERROR(device_data, COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
-                        "Draw command called with no descriptor set bound on set %u", set_idx);
-                }
-
-                uint32_t binding_idx = 0;
-                for (auto &binding : layout->second.bindings)
-                {
-                    auto current_descriptor = current_binding->second.descriptor_set->bindings.find(binding_idx);
-                    if (current_descriptor == current_binding->second.descriptor_set->bindings.end())
-                    {
-                        return LOG_ERROR(device_data, COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
-                            "Draw command called with no descriptor bound on set %u, binding %u", set_idx, binding_idx);
-                    }
-
-                    // TODO: should check this is compatible, valid, etc
-
-                    str << "      Set " << set_idx << ", binding " << binding_idx << ":\n";
-                    for (uint32_t array_idx = 0; array_idx < binding.descriptorCount; ++array_idx)
-                    {
-                        str << "        [" << array_idx << "]";
-                        switch (binding.descriptorType)
-                        {
-                        case VK_DESCRIPTOR_TYPE_SAMPLER:
-                        case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:
-                        case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
-                        case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
-                        case VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT:
-                        {
-                            auto &image_info = current_descriptor->second.descriptors.at(array_idx).imageInfo;
-                            auto image_view = device_data->sync.image_views.find(image_info.imageView);
-                            if (image_view == device_data->sync.image_views.end())
-                            {
-                                return LOG_ERROR(device_data, COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
-                                    "Draw command called with unknown image view on set %u, binding %u", set_idx, binding_idx);
-                            }
-                            auto image = device_data->sync.images.find(image_view->second.image);
-                            if (image == device_data->sync.images.end())
-                            {
-                                return LOG_ERROR(device_data, COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
-                                    "Draw command called with image view with unknown image on set %u, binding %u", set_idx, binding_idx);
-                            }
-                            auto memory = device_data->sync.device_memories.find(image->second.memory);
-                            if (memory == device_data->sync.device_memories.end())
-                            {
-                                return LOG_ERROR(device_data, COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
-                                    "Draw command called with image with unknown memory on set %u, binding %u", set_idx, binding_idx);
-                            }
-                            str << " memoryRequirements={";
-                            str << " size=" << image->second.memoryRequirements.size;
-                            str << " alignment=" << image->second.memoryRequirements.alignment;
-                            str << " memoryTypeBits=0x" << std::hex << image->second.memoryRequirements.memoryTypeBits << std::dec;
-                            str << " }";
-
-                            str << " memory=" << (void *)image->second.memory;
-                            str << " {";
-                            str << " allocationSize=" << memory->second.allocationSize;
-                            str << " memoryTypeIndex=" << memory->second.memoryTypeIndex;
-                            if (memory->second.isMapped)
-                            {
-                                str << " mapOffset=" << memory->second.mapOffset;
-                                str << " mapSize=" << memory->second.mapSize;
-                                str << " mapFlags=" << memory->second.mapFlags;
-                                str << " pMapData=" << memory->second.pMapData;
-                            }
-                            else
-                            {
-                                str << " unmapped";
-                            }
-                            str << " }";
-
-                            str << " memoryOffset=" << image->second.memoryOffset;
-                            str << " subresource={";
-                            str << " aspectMask=" << std::hex << image_view->second.subresourceRange.aspectMask << std::dec;
-                            str << " baseMipLevel=" << image_view->second.subresourceRange.baseMipLevel;
-                            str << " levelCount=" << image_view->second.subresourceRange.levelCount;
-                            str << " baseArrayLayer=" << image_view->second.subresourceRange.baseArrayLayer;
-                            str << " layerCount=" << image_view->second.subresourceRange.layerCount;
-                            str << " }";
-                            break;
-                        }
-                        case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:
-                        case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:
-                        {
-                            auto buffer_view = device_data->sync.buffer_views.find(current_descriptor->second.descriptors.at(array_idx).bufferView);
-                            if (buffer_view == device_data->sync.buffer_views.end())
-                            {
-                                return LOG_ERROR(device_data, COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
-                                    "Draw command called with unknown buffer view on set %u, binding %u", set_idx, binding_idx);
-                            }
-                            auto buffer = device_data->sync.buffers.find(buffer_view->second.buffer);
-                            if (buffer == device_data->sync.buffers.end())
-                            {
-                                return LOG_ERROR(device_data, COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
-                                    "Draw command called with buffer view with unknown buffer on set %u, binding %u", set_idx, binding_idx);
-                            }
-                            auto memory = device_data->sync.device_memories.find(buffer->second.memory);
-                            if (memory == device_data->sync.device_memories.end())
-                            {
-                                return LOG_ERROR(device_data, COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
-                                    "Draw command called with buffer with unknown memory on set %u, binding %u", set_idx, binding_idx);
-                            }
-                            str << " memoryRequirements={";
-                            str << " size=" << buffer->second.memoryRequirements.size;
-                            str << " alignment=" << buffer->second.memoryRequirements.alignment;
-                            str << " memoryTypeBits=0x" << std::hex << buffer->second.memoryRequirements.memoryTypeBits << std::dec;
-                            str << " }";
-
-                            str << " memory=" << (void *)buffer->second.memory;
-                            str << " {";
-                            str << " allocationSize=" << memory->second.allocationSize;
-                            str << " memoryTypeIndex=" << memory->second.memoryTypeIndex;
-                            if (memory->second.isMapped)
-                            {
-                                str << " mapOffset=" << memory->second.mapOffset;
-                                str << " mapSize=" << memory->second.mapSize;
-                                str << " mapFlags=" << memory->second.mapFlags;
-                                str << " pMapData=" << memory->second.pMapData;
-                            }
-                            else
-                            {
-                                str << " unmapped";
-                            }
-                            str << " }";
-
-                            str << " memoryOffset=" << buffer->second.memoryOffset;
-                            str << " size=" << buffer->second.size;
-                            str << " offset=" << buffer_view->second.offset;
-                            str << " range=" << buffer_view->second.range;
-                            break;
-                        }
-                        case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
-                        case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
-                        case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC:
-                        case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC:
-                        {
-                            auto &buffer_info = current_descriptor->second.descriptors.at(array_idx).bufferInfo;
-                            auto buffer = device_data->sync.buffers.find(buffer_info.buffer);
-                            if (buffer == device_data->sync.buffers.end())
-                            {
-                                return LOG_ERROR(device_data, COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
-                                    "Draw command called with unknown buffer on set %u, binding %u", set_idx, binding_idx);
-                            }
-                            auto memory = device_data->sync.device_memories.find(buffer->second.memory);
-                            if (memory == device_data->sync.device_memories.end())
-                            {
-                                return LOG_ERROR(device_data, COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
-                                    "Draw command called with buffer with unknown memory on set %u, binding %u", set_idx, binding_idx);
-                            }
-                            str << " memoryRequirements={";
-                            str << " size=" << buffer->second.memoryRequirements.size;
-                            str << " alignment=" << buffer->second.memoryRequirements.alignment;
-                            str << " memoryTypeBits=0x" << std::hex << buffer->second.memoryRequirements.memoryTypeBits << std::dec;
-                            str << " }";
-
-                            str << " memory=" << (void *)buffer->second.memory;
-                            str << " {";
-                            str << " allocationSize=" << memory->second.allocationSize;
-                            str << " memoryTypeIndex=" << memory->second.memoryTypeIndex;
-                            if (memory->second.isMapped)
-                            {
-                                str << " mapOffset=" << memory->second.mapOffset;
-                                str << " mapSize=" << memory->second.mapSize;
-                                str << " mapFlags=" << memory->second.mapFlags;
-                                str << " pMapData=" << memory->second.pMapData;
-                            }
-                            else
-                            {
-                                str << " unmapped";
-                            }
-                            str << " }";
-
-                            str << " memoryOffset=" << buffer->second.memoryOffset;
-                            str << " size=" << buffer->second.size;
-                            break;
-                        }
-                        default:
-                            str << " (INVALID TYPE)";
-                            break;
-                        }
-                        str << "\n";
-                    }
-                    ++binding_idx;
-                }
-
-                ++set_idx;
-            }
-
-            if (LOG_INFO(device_data, COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
-                    "%s", str.str().c_str()))
-                return true;
-        }
-    }
-
-    return false;
-}
-
-
 LAYER_FN(VkResult) vkQueueSubmit(
     VkQueue queue,
     uint32_t submitCount,
@@ -744,8 +450,7 @@ LAYER_FN(VkResult) vkQueueSubmit(
                         "Command buffer contents:\n%s", str.str().c_str());
                 }
 
-                skipCall |= dump_command_buffer(device_data, buf);
-
+                skipCall |= device_data->sync.mSyncValidator->submitCmdBuffer(queue, buf);
             }
         }
     }
@@ -798,6 +503,7 @@ LAYER_FN(VkResult) vkAllocateMemory(
 
         sync_device_memory device_memory;
         device_memory.deviceMemory = *pMemory;
+        device_memory.uid = device_data->sync.nextMemoryUid++;
         device_memory.allocationSize = pAllocateInfo->allocationSize;
         device_memory.memoryTypeIndex = pAllocateInfo->memoryTypeIndex;
         device_memory.isMapped = false;
@@ -2539,18 +2245,18 @@ LAYER_FN(void) vkCmdCopyImage(
     device_data->dispatch.CmdCopyImage(commandBuffer, srcImage, srcImageLayout, dstImage, dstImageLayout, regionCount, pRegions);
 }
 
-// LAYER_FN(void) vkCmdBlitImage)(VkCommandBuffer commandBuffer, VkImage srcImage, VkImageLayout srcImageLayout, VkImage dstImage, VkImageLayout dstImageLayout, uint32_t regionCount, const VkImageBlit* pRegions, VkFilter filter);
-// LAYER_FN(void) vkCmdCopyBufferToImage)(VkCommandBuffer commandBuffer, VkBuffer srcBuffer, VkImage dstImage, VkImageLayout dstImageLayout, uint32_t regionCount, const VkBufferImageCopy* pRegions);
-// LAYER_FN(void) vkCmdCopyImageToBuffer)(VkCommandBuffer commandBuffer, VkImage srcImage, VkImageLayout srcImageLayout, VkBuffer dstBuffer, uint32_t regionCount, const VkBufferImageCopy* pRegions);
-// LAYER_FN(void) vkCmdUpdateBuffer)(VkCommandBuffer commandBuffer, VkBuffer dstBuffer, VkDeviceSize dstOffset, VkDeviceSize dataSize, const uint32_t* pData);
-// LAYER_FN(void) vkCmdFillBuffer)(VkCommandBuffer commandBuffer, VkBuffer dstBuffer, VkDeviceSize dstOffset, VkDeviceSize size, uint32_t data);
-// LAYER_FN(void) vkCmdClearColorImage)(VkCommandBuffer commandBuffer, VkImage image, VkImageLayout imageLayout, const VkClearColorValue* pColor, uint32_t rangeCount, const VkImageSubresourceRange* pRanges);
-// LAYER_FN(void) vkCmdClearDepthStencilImage)(VkCommandBuffer commandBuffer, VkImage image, VkImageLayout imageLayout, const VkClearDepthStencilValue* pDepthStencil, uint32_t rangeCount, const VkImageSubresourceRange* pRanges);
-// LAYER_FN(void) vkCmdClearAttachments)(VkCommandBuffer commandBuffer, uint32_t attachmentCount, const VkClearAttachment* pAttachments, uint32_t rectCount, const VkClearRect* pRects);
-// LAYER_FN(void) vkCmdResolveImage)(VkCommandBuffer commandBuffer, VkImage srcImage, VkImageLayout srcImageLayout, VkImage dstImage, VkImageLayout dstImageLayout, uint32_t regionCount, const VkImageResolve* pRegions);
-// LAYER_FN(void) vkCmdSetEvent)(VkCommandBuffer commandBuffer, VkEvent event, VkPipelineStageFlags stageMask);
-// LAYER_FN(void) vkCmdResetEvent)(VkCommandBuffer commandBuffer, VkEvent event, VkPipelineStageFlags stageMask);
-// LAYER_FN(void) vkCmdWaitEvents)(VkCommandBuffer commandBuffer, uint32_t eventCount, const VkEvent* pEvents, VkPipelineStageFlags srcStageMask, VkPipelineStageFlags dstStageMask, uint32_t memoryBarrierCount, const VkMemoryBarrier* pMemoryBarriers, uint32_t bufferMemoryBarrierCount, const VkBufferMemoryBarrier* pBufferMemoryBarriers, uint32_t imageMemoryBarrierCount, const VkImageMemoryBarrier* pImageMemoryBarriers);
+// LAYER_FN(void) vkCmdBlitImage(VkCommandBuffer commandBuffer, VkImage srcImage, VkImageLayout srcImageLayout, VkImage dstImage, VkImageLayout dstImageLayout, uint32_t regionCount, const VkImageBlit* pRegions, VkFilter filter);
+// LAYER_FN(void) vkCmdCopyBufferToImage(VkCommandBuffer commandBuffer, VkBuffer srcBuffer, VkImage dstImage, VkImageLayout dstImageLayout, uint32_t regionCount, const VkBufferImageCopy* pRegions);
+// LAYER_FN(void) vkCmdCopyImageToBuffer(VkCommandBuffer commandBuffer, VkImage srcImage, VkImageLayout srcImageLayout, VkBuffer dstBuffer, uint32_t regionCount, const VkBufferImageCopy* pRegions);
+// LAYER_FN(void) vkCmdUpdateBuffer(VkCommandBuffer commandBuffer, VkBuffer dstBuffer, VkDeviceSize dstOffset, VkDeviceSize dataSize, const uint32_t* pData);
+// LAYER_FN(void) vkCmdFillBuffer(VkCommandBuffer commandBuffer, VkBuffer dstBuffer, VkDeviceSize dstOffset, VkDeviceSize size, uint32_t data);
+// LAYER_FN(void) vkCmdClearColorImage(VkCommandBuffer commandBuffer, VkImage image, VkImageLayout imageLayout, const VkClearColorValue* pColor, uint32_t rangeCount, const VkImageSubresourceRange* pRanges);
+// LAYER_FN(void) vkCmdClearDepthStencilImage(VkCommandBuffer commandBuffer, VkImage image, VkImageLayout imageLayout, const VkClearDepthStencilValue* pDepthStencil, uint32_t rangeCount, const VkImageSubresourceRange* pRanges);
+// LAYER_FN(void) vkCmdClearAttachments(VkCommandBuffer commandBuffer, uint32_t attachmentCount, const VkClearAttachment* pAttachments, uint32_t rectCount, const VkClearRect* pRects);
+// LAYER_FN(void) vkCmdResolveImage(VkCommandBuffer commandBuffer, VkImage srcImage, VkImageLayout srcImageLayout, VkImage dstImage, VkImageLayout dstImageLayout, uint32_t regionCount, const VkImageResolve* pRegions);
+// LAYER_FN(void) vkCmdSetEvent(VkCommandBuffer commandBuffer, VkEvent event, VkPipelineStageFlags stageMask);
+// LAYER_FN(void) vkCmdResetEvent(VkCommandBuffer commandBuffer, VkEvent event, VkPipelineStageFlags stageMask);
+// LAYER_FN(void) vkCmdWaitEvents(VkCommandBuffer commandBuffer, uint32_t eventCount, const VkEvent* pEvents, VkPipelineStageFlags srcStageMask, VkPipelineStageFlags dstStageMask, uint32_t memoryBarrierCount, const VkMemoryBarrier* pMemoryBarriers, uint32_t bufferMemoryBarrierCount, const VkBufferMemoryBarrier* pBufferMemoryBarriers, uint32_t imageMemoryBarrierCount, const VkImageMemoryBarrier* pImageMemoryBarriers);
 
 LAYER_FN(void) vkCmdPipelineBarrier(
     VkCommandBuffer commandBuffer,
