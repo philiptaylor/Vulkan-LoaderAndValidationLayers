@@ -44,76 +44,76 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
 {
     // XXX: need mutex on mSyncDevice
 
-    VkPipeline graphics_pipeline = VK_NULL_HANDLE;
-    VkPipeline compute_pipeline = VK_NULL_HANDLE;
+    VkPipeline graphicsPipeline = VK_NULL_HANDLE;
+    VkPipeline computePipeline = VK_NULL_HANDLE;
 
     struct Binding
     {
-        sync_descriptor_set *descriptor_set;
-        uint32_t dynamic_offset; // TODO
+        sync_descriptor_set *descriptorSet;
+        uint32_t dynamicOffset; // TODO
     };
 
-    std::map<uint32_t, Binding> graphics_bindings;
-    std::map<uint32_t, Binding> compute_bindings;
+    std::map<uint32_t, Binding> graphicsBindings;
+    std::map<uint32_t, Binding> computeBindings;
 
     for (auto &cmd : buf.commands)
     {
         // TODO: reset state on vkCmdExecuteCommands
 
-        auto bind_pipeline = cmd->as_bind_pipeline();
-        if (bind_pipeline)
+        auto bindPipeline = cmd->as_bind_pipeline();
+        if (bindPipeline)
         {
-            if (bind_pipeline->pipelineBindPoint == VK_PIPELINE_BIND_POINT_GRAPHICS)
-                graphics_pipeline = bind_pipeline->pipeline;
-            else if (bind_pipeline->pipelineBindPoint == VK_PIPELINE_BIND_POINT_COMPUTE)
-                compute_pipeline = bind_pipeline->pipeline;
+            if (bindPipeline->pipelineBindPoint == VK_PIPELINE_BIND_POINT_GRAPHICS)
+                graphicsPipeline = bindPipeline->pipeline;
+            else if (bindPipeline->pipelineBindPoint == VK_PIPELINE_BIND_POINT_COMPUTE)
+                computePipeline = bindPipeline->pipeline;
         }
 
-        auto bind_descriptor_sets = cmd->as_bind_descriptor_sets();
-        if (bind_descriptor_sets)
+        auto bindDescriptorSets = cmd->as_bind_descriptor_sets();
+        if (bindDescriptorSets)
         {
             // TODO: should look at pipeline layout compatibility here
             // TODO: dynamic offsets
 
-            for (uint32_t i = 0; i < bind_descriptor_sets->descriptorSets.size(); ++i)
+            for (uint32_t i = 0; i < bindDescriptorSets->descriptorSets.size(); ++i)
             {
-                uint32_t set_number = bind_descriptor_sets->firstSet + i;
+                uint32_t setNumber = bindDescriptorSets->firstSet + i;
 
-                auto descriptor_set = mSyncDevice.descriptor_sets.find(bind_descriptor_sets->descriptorSets[i]);
-                if (descriptor_set == mSyncDevice.descriptor_sets.end())
+                auto descriptorSet = mSyncDevice.descriptor_sets.find(bindDescriptorSets->descriptorSets[i]);
+                if (descriptorSet == mSyncDevice.descriptor_sets.end())
                 {
                     return LOG_ERROR(COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
                         "Draw command called with unknown descriptor set bound");
                 }
 
                 Binding binding;
-                binding.descriptor_set = &descriptor_set->second;
-                binding.dynamic_offset = 0;
+                binding.descriptorSet = &descriptorSet->second;
+                binding.dynamicOffset = 0;
 
-                if (bind_descriptor_sets->pipelineBindPoint == VK_PIPELINE_BIND_POINT_GRAPHICS)
-                    graphics_bindings[set_number] = binding;
-                else if (bind_descriptor_sets->pipelineBindPoint == VK_PIPELINE_BIND_POINT_COMPUTE)
-                    compute_bindings[set_number] = binding;
+                if (bindDescriptorSets->pipelineBindPoint == VK_PIPELINE_BIND_POINT_GRAPHICS)
+                    graphicsBindings[setNumber] = binding;
+                else if (bindDescriptorSets->pipelineBindPoint == VK_PIPELINE_BIND_POINT_COMPUTE)
+                    computeBindings[setNumber] = binding;
             }
         }
 
         if (cmd->is_draw())
         {
-            if (graphics_pipeline == VK_NULL_HANDLE)
+            if (graphicsPipeline == VK_NULL_HANDLE)
             {
                 return LOG_ERROR(COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
                     "Draw command called with no pipeline bound");
             }
 
-            auto pipeline = mSyncDevice.graphics_pipelines.find(graphics_pipeline);
+            auto pipeline = mSyncDevice.graphics_pipelines.find(graphicsPipeline);
             if (pipeline == mSyncDevice.graphics_pipelines.end())
             {
                 return LOG_ERROR(COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
                     "Draw command called with unknown pipeline bound");
             }
 
-            auto pipeline_layout = mSyncDevice.pipeline_layouts.find(pipeline->second.layout);
-            if (pipeline_layout == mSyncDevice.pipeline_layouts.end())
+            auto pipelineLayout = mSyncDevice.pipeline_layouts.find(pipeline->second.layout);
+            if (pipelineLayout == mSyncDevice.pipeline_layouts.end())
             {
                 return LOG_ERROR(COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
                     "Draw command called with pipeline with unknown pipeline layout");
@@ -125,8 +125,8 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
             str << "\n    Current pipeline:\n      ";
             pipeline->second.to_string(str);
             str << "\n    Current pipeline layout:\n      ";
-            pipeline_layout->second.to_string(str);
-            for (auto &setLayout : pipeline_layout->second.setLayouts)
+            pipelineLayout->second.to_string(str);
+            for (auto &setLayout : pipelineLayout->second.setLayouts)
             {
                 auto set_layout = mSyncDevice.descriptor_set_layouts.find(setLayout);
                 if (set_layout == mSyncDevice.descriptor_set_layouts.end())
@@ -139,47 +139,47 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
                 set_layout->second.to_string(str);
             }
             str << "\n    Current bindings:\n";
-            for (auto &binding : graphics_bindings)
+            for (auto &binding : graphicsBindings)
             {
                 str << "      " << binding.first << ": ";
-                binding.second.descriptor_set->to_string(str);
+                binding.second.descriptorSet->to_string(str);
                 str << "\n";
             }
 
             str << "\n    Accessible memory:\n";
-            uint32_t set_idx = 0;
-            for (auto &set_layout : pipeline_layout->second.setLayouts)
+            uint32_t setIdx = 0;
+            for (auto &setLayout : pipelineLayout->second.setLayouts)
             {
-                auto layout = mSyncDevice.descriptor_set_layouts.find(set_layout);
+                auto layout = mSyncDevice.descriptor_set_layouts.find(setLayout);
                 if (layout == mSyncDevice.descriptor_set_layouts.end())
                 {
                     return LOG_ERROR(COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
                         "Draw command called with pipeline layout with unknown descriptor set layout");
                 }
 
-                auto current_binding = graphics_bindings.find(set_idx);
-                if (current_binding == graphics_bindings.end())
+                auto currentBinding = graphicsBindings.find(setIdx);
+                if (currentBinding == graphicsBindings.end())
                 {
                     return LOG_ERROR(COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
-                        "Draw command called with no descriptor set bound on set %u", set_idx);
+                        "Draw command called with no descriptor set bound on set %u", setIdx);
                 }
 
-                uint32_t binding_idx = 0;
+                uint32_t bindingIdx = 0;
                 for (auto &binding : layout->second.bindings)
                 {
-                    auto current_descriptor = current_binding->second.descriptor_set->bindings.find(binding_idx);
-                    if (current_descriptor == current_binding->second.descriptor_set->bindings.end())
+                    auto currentDescriptor = currentBinding->second.descriptorSet->bindings.find(bindingIdx);
+                    if (currentDescriptor == currentBinding->second.descriptorSet->bindings.end())
                     {
                         return LOG_ERROR(COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
-                            "Draw command called with no descriptor bound on set %u, binding %u", set_idx, binding_idx);
+                            "Draw command called with no descriptor bound on set %u, binding %u", setIdx, bindingIdx);
                     }
 
                     // TODO: should check this is compatible, valid, etc
 
-                    str << "      Set " << set_idx << ", binding " << binding_idx << ":\n";
-                    for (uint32_t array_idx = 0; array_idx < binding.descriptorCount; ++array_idx)
+                    str << "      Set " << setIdx << ", binding " << bindingIdx << ":\n";
+                    for (uint32_t arrayIdx = 0; arrayIdx < binding.descriptorCount; ++arrayIdx)
                     {
-                        str << "        [" << array_idx << "]";
+                        str << "        [" << arrayIdx << "]";
                         switch (binding.descriptorType)
                         {
                         case VK_DESCRIPTOR_TYPE_SAMPLER:
@@ -188,24 +188,24 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
                         case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
                         case VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT:
                         {
-                            auto &image_info = current_descriptor->second.descriptors.at(array_idx).imageInfo;
-                            auto image_view = mSyncDevice.image_views.find(image_info.imageView);
-                            if (image_view == mSyncDevice.image_views.end())
+                            auto &imageInfo = currentDescriptor->second.descriptors.at(arrayIdx).imageInfo;
+                            auto imageView = mSyncDevice.image_views.find(imageInfo.imageView);
+                            if (imageView == mSyncDevice.image_views.end())
                             {
                                 return LOG_ERROR(COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
-                                    "Draw command called with unknown image view on set %u, binding %u", set_idx, binding_idx);
+                                    "Draw command called with unknown image view on set %u, binding %u", setIdx, bindingIdx);
                             }
-                            auto image = mSyncDevice.images.find(image_view->second.image);
+                            auto image = mSyncDevice.images.find(imageView->second.image);
                             if (image == mSyncDevice.images.end())
                             {
                                 return LOG_ERROR(COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
-                                    "Draw command called with image view with unknown image on set %u, binding %u", set_idx, binding_idx);
+                                    "Draw command called with image view with unknown image on set %u, binding %u", setIdx, bindingIdx);
                             }
                             auto memory = mSyncDevice.device_memories.find(image->second.memory);
                             if (memory == mSyncDevice.device_memories.end())
                             {
                                 return LOG_ERROR(COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
-                                    "Draw command called with image with unknown memory on set %u, binding %u", set_idx, binding_idx);
+                                    "Draw command called with image with unknown memory on set %u, binding %u", setIdx, bindingIdx);
                             }
                             str << " memoryRequirements={";
                             str << " size=" << image->second.memoryRequirements.size;
@@ -233,34 +233,34 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
 
                             str << " memoryOffset=" << image->second.memoryOffset;
                             str << " subresource={";
-                            str << " aspectMask=" << std::hex << image_view->second.subresourceRange.aspectMask << std::dec;
-                            str << " baseMipLevel=" << image_view->second.subresourceRange.baseMipLevel;
-                            str << " levelCount=" << image_view->second.subresourceRange.levelCount;
-                            str << " baseArrayLayer=" << image_view->second.subresourceRange.baseArrayLayer;
-                            str << " layerCount=" << image_view->second.subresourceRange.layerCount;
+                            str << " aspectMask=" << std::hex << imageView->second.subresourceRange.aspectMask << std::dec;
+                            str << " baseMipLevel=" << imageView->second.subresourceRange.baseMipLevel;
+                            str << " levelCount=" << imageView->second.subresourceRange.levelCount;
+                            str << " baseArrayLayer=" << imageView->second.subresourceRange.baseArrayLayer;
+                            str << " layerCount=" << imageView->second.subresourceRange.layerCount;
                             str << " }";
                             break;
                         }
                         case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:
                         case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:
                         {
-                            auto buffer_view = mSyncDevice.buffer_views.find(current_descriptor->second.descriptors.at(array_idx).bufferView);
-                            if (buffer_view == mSyncDevice.buffer_views.end())
+                            auto bufferView = mSyncDevice.buffer_views.find(currentDescriptor->second.descriptors.at(arrayIdx).bufferView);
+                            if (bufferView == mSyncDevice.buffer_views.end())
                             {
                                 return LOG_ERROR(COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
-                                    "Draw command called with unknown buffer view on set %u, binding %u", set_idx, binding_idx);
+                                    "Draw command called with unknown buffer view on set %u, binding %u", setIdx, bindingIdx);
                             }
-                            auto buffer = mSyncDevice.buffers.find(buffer_view->second.buffer);
+                            auto buffer = mSyncDevice.buffers.find(bufferView->second.buffer);
                             if (buffer == mSyncDevice.buffers.end())
                             {
                                 return LOG_ERROR(COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
-                                    "Draw command called with buffer view with unknown buffer on set %u, binding %u", set_idx, binding_idx);
+                                    "Draw command called with buffer view with unknown buffer on set %u, binding %u", setIdx, bindingIdx);
                             }
                             auto memory = mSyncDevice.device_memories.find(buffer->second.memory);
                             if (memory == mSyncDevice.device_memories.end())
                             {
                                 return LOG_ERROR(COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
-                                    "Draw command called with buffer with unknown memory on set %u, binding %u", set_idx, binding_idx);
+                                    "Draw command called with buffer with unknown memory on set %u, binding %u", setIdx, bindingIdx);
                             }
                             str << " memoryRequirements={";
                             str << " size=" << buffer->second.memoryRequirements.size;
@@ -288,8 +288,8 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
 
                             str << " memoryOffset=" << buffer->second.memoryOffset;
                             str << " size=" << buffer->second.size;
-                            str << " offset=" << buffer_view->second.offset;
-                            str << " range=" << buffer_view->second.range;
+                            str << " offset=" << bufferView->second.offset;
+                            str << " range=" << bufferView->second.range;
                             break;
                         }
                         case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
@@ -297,18 +297,18 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
                         case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC:
                         case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC:
                         {
-                            auto &buffer_info = current_descriptor->second.descriptors.at(array_idx).bufferInfo;
-                            auto buffer = mSyncDevice.buffers.find(buffer_info.buffer);
+                            auto &bufferInfo = currentDescriptor->second.descriptors.at(arrayIdx).bufferInfo;
+                            auto buffer = mSyncDevice.buffers.find(bufferInfo.buffer);
                             if (buffer == mSyncDevice.buffers.end())
                             {
                                 return LOG_ERROR(COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
-                                    "Draw command called with unknown buffer on set %u, binding %u", set_idx, binding_idx);
+                                    "Draw command called with unknown buffer on set %u, binding %u", setIdx, bindingIdx);
                             }
                             auto memory = mSyncDevice.device_memories.find(buffer->second.memory);
                             if (memory == mSyncDevice.device_memories.end())
                             {
                                 return LOG_ERROR(COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
-                                    "Draw command called with buffer with unknown memory on set %u, binding %u", set_idx, binding_idx);
+                                    "Draw command called with buffer with unknown memory on set %u, binding %u", setIdx, bindingIdx);
                             }
                             str << " memoryRequirements={";
                             str << " size=" << buffer->second.memoryRequirements.size;
@@ -344,10 +344,10 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
                         }
                         str << "\n";
                     }
-                    ++binding_idx;
+                    ++bindingIdx;
                 }
 
-                ++set_idx;
+                ++setIdx;
             }
 
             if (LOG_INFO(COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
