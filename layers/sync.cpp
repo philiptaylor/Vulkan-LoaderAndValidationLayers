@@ -86,6 +86,14 @@
 #include "vk_layer_extension_utils.h"
 #include "vk_layer_utils.h"
 
+#if _WIN32
+#pragma warning(push)
+#pragma warning(disable: 4091)
+#include <DbgHelp.h>
+#pragma warning(pop)
+#pragma comment(lib, "dbghelp.lib")
+#endif
+
 #define LAYER_FN(ret) VK_LAYER_EXPORT VKAPI_ATTR ret VKAPI_CALL
 
 #define _LOG_GENERIC(level, layer_data, objType, object, messageCode, fmt, ...) \
@@ -188,6 +196,7 @@ static sync_command_buffer *get_sync_command_buffer(VkCommandBuffer commandBuffe
     return &it->second;
 }
 
+
 static const VkExtensionProperties instance_extensions[] = {{VK_EXT_DEBUG_REPORT_EXTENSION_NAME, VK_EXT_DEBUG_REPORT_SPEC_VERSION}};
 
 LAYER_FN(VkResult) vkEnumerateInstanceExtensionProperties(
@@ -271,6 +280,21 @@ LAYER_FN(VkResult) vkCreateInstance(
         ).second;
         assert(inserted == true);
     }
+
+#ifdef _WIN32
+    // XXX: this needs to be abstracted out to a process-wide thing
+    {
+        DWORD opts = SymGetOptions();
+        opts |= SYMOPT_DEFERRED_LOADS;
+        opts |= SYMOPT_LOAD_LINES;
+        opts |= SYMOPT_UNDNAME;
+        SymSetOptions(opts);
+        if (!SymInitialize(GetCurrentProcess(), nullptr, TRUE))
+        {
+            assert(0);
+        }
+    }
+#endif
 
     return VK_SUCCESS;
 }
@@ -445,6 +469,11 @@ LAYER_FN(VkResult) vkQueueSubmit(
                         str << "    ";
                         cmd->to_string(str);
                         str << "\n";
+
+//                         std::vector<std::string> bt = cmd->get_backtrace();
+//                         for (std::string &s : bt)
+//                             str << "      " << s << "\n";
+
                     }
                     skipCall |= LOG_INFO(device_data, COMMAND_BUFFER, command_buffer, SYNC_MSG_NONE,
                         "Command buffer contents:\n%s", str.str().c_str());
@@ -2579,4 +2608,54 @@ void sync_command_buffer::reset()
     pipelineStatistics = 0;
 
     commands.clear();
+}
+
+
+sync_cmd_base::sync_cmd_base()
+{
+    memset(mBackTrace, 0, sizeof(mBackTrace));
+#ifdef _WIN32
+    // Skip 4 frames (this constructor, the sync_cmd_foo constructor,
+    // the layer wrapper function, the loader function)
+    // TODO: skip more if there are more layers
+    CaptureStackBackTrace(4, BACKTRACE_SIZE, mBackTrace, nullptr);
+#endif
+}
+
+std::vector<std::string> sync_cmd_base::get_backtrace()
+{
+    std::vector<std::string> bt;
+
+#ifdef _WIN32
+    // XXX: this is all broken and non-threadsafe etc
+
+    std::vector<uint8_t> symbolInfoBuffer(sizeof(SYMBOL_INFO) + MAX_SYM_NAME * sizeof(TCHAR));
+    SYMBOL_INFO *symbolInfo = (SYMBOL_INFO *)symbolInfoBuffer.data();
+    symbolInfo->SizeOfStruct = sizeof(SYMBOL_INFO);
+    symbolInfo->MaxNameLen = MAX_SYM_NAME;
+
+    IMAGEHLP_LINE64 lineInfo;
+    lineInfo.SizeOfStruct = sizeof(IMAGEHLP_LINE64);
+
+    for (int i = 0; i < BACKTRACE_SIZE; ++i)
+    {
+        if (!mBackTrace[i])
+            continue;
+
+        std::stringstream str;
+
+        DWORD displacement;
+        if (SymGetLineFromAddr(GetCurrentProcess(), (intptr_t)mBackTrace[i], &displacement, &lineInfo))
+            str << lineInfo.FileName << "(" << lineInfo.LineNumber << ")";
+        else
+            str << mBackTrace[i];
+
+        DWORD64 displacement64;
+        if (SymFromAddr(GetCurrentProcess(), (intptr_t)mBackTrace[i], &displacement64, symbolInfo))
+            str << " " << symbolInfo->Name;
+
+        bt.push_back(str.str());
+    }
+#endif
+    return bt;
 }

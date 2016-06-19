@@ -58,6 +58,8 @@ enum class sync_command_buffer_state
 class sync_cmd_base
 {
 public:
+    sync_cmd_base();
+
     virtual ~sync_cmd_base() { }
 
     virtual bool is_draw() const { return false; }
@@ -66,6 +68,11 @@ public:
     virtual const sync_cmd_bind_descriptor_sets *as_bind_descriptor_sets() const { return nullptr; }
 
     virtual void to_string(std::ostream &str) = 0;
+
+    std::vector<std::string> get_backtrace();
+
+    static const int BACKTRACE_SIZE = 8;
+    void *mBackTrace[BACKTRACE_SIZE];
 };
 
 class sync_cmd_bind_pipeline : public sync_cmd_base
