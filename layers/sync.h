@@ -32,8 +32,12 @@
 #include <vector>
 #include <memory>
 
+class sync_cmd_begin_render_pass;
+class sync_cmd_next_subpass;
+class sync_cmd_end_render_pass;
 class sync_cmd_bind_pipeline;
 class sync_cmd_bind_descriptor_sets;
+
 class SyncValidator;
 
 enum sync_msg
@@ -64,6 +68,10 @@ public:
 
     virtual bool is_draw() const { return false; }
 
+    virtual const sync_cmd_begin_render_pass *as_begin_render_pass() const { return nullptr; }
+    virtual const sync_cmd_next_subpass *as_next_subpass() const { return nullptr; }
+    virtual const sync_cmd_end_render_pass *as_end_render_pass() const { return nullptr; }
+
     virtual const sync_cmd_bind_pipeline *as_bind_pipeline() const { return nullptr; }
     virtual const sync_cmd_bind_descriptor_sets *as_bind_descriptor_sets() const { return nullptr; }
 
@@ -87,7 +95,7 @@ public:
     }
 
     virtual void to_string(std::ostream &str) override;
-    virtual const sync_cmd_bind_pipeline *as_bind_pipeline() const { return this; }
+    virtual const sync_cmd_bind_pipeline *as_bind_pipeline() const override { return this; }
 
     VkPipelineBindPoint pipelineBindPoint;
     VkPipeline pipeline;
@@ -149,7 +157,7 @@ public:
     }
 
     virtual void to_string(std::ostream &str) override;
-    virtual const sync_cmd_bind_descriptor_sets *as_bind_descriptor_sets() const { return this; }
+    virtual const sync_cmd_bind_descriptor_sets *as_bind_descriptor_sets() const override { return this; }
 
     VkPipelineBindPoint pipelineBindPoint;
     VkPipelineLayout layout;
@@ -306,6 +314,8 @@ public:
     }
 
     virtual void to_string(std::ostream &str) override;
+    virtual const sync_cmd_begin_render_pass *as_begin_render_pass() const override { return this; }
+
 
     VkRenderPass renderPass;
     VkFramebuffer framebuffer;
@@ -323,6 +333,7 @@ public:
     }
 
     virtual void to_string(std::ostream &str) override;
+    virtual const sync_cmd_next_subpass *as_next_subpass() const override { return nullptr; }
 
     VkSubpassContents contents;
 };
@@ -335,6 +346,7 @@ public:
     }
 
     virtual void to_string(std::ostream &str) override;
+    virtual const sync_cmd_end_render_pass *as_end_render_pass() const override { return nullptr; }
 };
 
 

@@ -60,6 +60,9 @@
  *
  * For each event, do a graph search to every previous overlapping node, if any are not found then complain
  *
+ * NOTE: for initial implementation, we want to construct the complete explicit graph,
+ * to make it easier to verify the spec and draw diagrams etc.
+ * In the future we might want to optimise it to be less insane.
  *
  * Tracking:
  *   Assign each command a (queue_idx, subpass_idx or -1, idx_in_queue++)
@@ -97,7 +100,7 @@
 #define LAYER_FN(ret) VK_LAYER_EXPORT VKAPI_ATTR ret VKAPI_CALL
 
 #define _LOG_GENERIC(level, layer_data, objType, object, messageCode, fmt, ...) \
-    log_msg((layer_data)->report_data, VK_DEBUG_REPORT_DEBUG_BIT_EXT, \
+    log_msg((layer_data)->report_data, level, \
         VK_DEBUG_REPORT_OBJECT_TYPE_##objType##_EXT, (uint64_t)(object), \
         __LINE__, (messageCode), "SYNC", (fmt), __VA_ARGS__)
 

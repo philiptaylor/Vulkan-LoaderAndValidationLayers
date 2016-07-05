@@ -328,7 +328,7 @@ dbgFunc(
     else
         severity = "???";
 
-    if (1)
+    if (0)
         PrintfMessage("[%s][CALLBACK] %s: %s [flags=0x%x objectType=%d object=0x%llx location=%d messageCode=%d pUserData=%p]\n",
             severity, pLayerPrefix, pMessage, flags, objectType, (unsigned long long)object, location, messageCode, pUserData);
     else
@@ -2503,7 +2503,7 @@ static void demo_init_vk(struct demo *demo) {
         dbgCreateInfo.flags =
             VK_DEBUG_REPORT_ERROR_BIT_EXT | VK_DEBUG_REPORT_WARNING_BIT_EXT;
         dbgCreateInfo.flags |=
-            VK_DEBUG_REPORT_INFORMATION_BIT_EXT | VK_DEBUG_REPORT_DEBUG_BIT_EXT | VK_DEBUG_REPORT_PERFORMANCE_WARNING_BIT_EXT;
+            VK_DEBUG_REPORT_INFORMATION_BIT_EXT | /*VK_DEBUG_REPORT_DEBUG_BIT_EXT |*/ VK_DEBUG_REPORT_PERFORMANCE_WARNING_BIT_EXT;
         err = demo->CreateDebugReportCallback(demo->inst, &dbgCreateInfo, NULL,
                                               &demo->msg_callback);
         switch (err) {
