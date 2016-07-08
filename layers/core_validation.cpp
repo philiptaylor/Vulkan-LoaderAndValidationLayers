@@ -335,6 +335,14 @@ EVENT_NODE *getEventNode(layer_data *dev_data, VkEvent event) {
     return &it->second;
 }
 
+QUERY_POOL_NODE *getQueryPoolNode(layer_data *dev_data, VkQueryPool query_pool) {
+    auto it = dev_data->queryPoolMap.find(query_pool);
+    if (it == dev_data->queryPoolMap.end()) {
+        return nullptr;
+    }
+    return &it->second;
+}
+
 QUEUE_NODE *getQueueNode(layer_data *dev_data, VkQueue queue) {
     auto it = dev_data->queueMap.find(queue);
     if (it == dev_data->queueMap.end()) {
@@ -660,6 +668,8 @@ static const char *object_type_to_string(VkDebugReportObjectTypeEXT type) {
         return "buffer";
     case VK_DEBUG_REPORT_OBJECT_TYPE_EVENT_EXT:
         return "event";
+    case VK_DEBUG_REPORT_OBJECT_TYPE_QUERY_POOL_EXT:
+        return "query pool";
     default:
         return "unknown";
     }
@@ -3757,6 +3767,12 @@ static void removeCommandBufferBinding(layer_data *dev_data, VK_OBJECT const *ob
             evt_node->cb_bindings.erase(cb_node);
         break;
     }
+    case VK_DEBUG_REPORT_OBJECT_TYPE_QUERY_POOL_EXT: {
+        auto qp_node = getQueryPoolNode(dev_data, reinterpret_cast<VkQueryPool>(object->handle));
+        if (qp_node)
+            qp_node->cb_bindings.erase(cb_node);
+        break;
+    }
     default:
         assert(0); // unhandled object type
     }
@@ -5051,9 +5067,17 @@ VKAPI_ATTR void VKAPI_CALL DestroyEvent(VkDevice device, VkEvent event, const Vk
 
 VKAPI_ATTR void VKAPI_CALL
 DestroyQueryPool(VkDevice device, VkQueryPool queryPool, const VkAllocationCallbacks *pAllocator) {
-    get_my_data_ptr(get_dispatch_key(device), layer_data_map)
-        ->device_dispatch_table->DestroyQueryPool(device, queryPool, pAllocator);
-    // TODO : Clean up any internal data structures using this obj.
+    layer_data *dev_data = get_my_data_ptr(get_dispatch_key(device), layer_data_map);
+    dev_data->device_dispatch_table->DestroyQueryPool(device, queryPool, pAllocator);
+
+    std::unique_lock<std::mutex> lock(global_lock);
+    auto qp_node = getQueryPoolNode(dev_data, queryPool);
+    if (qp_node) {
+        // Any bound cmd buffers are now invalid
+        invalidateCommandBuffers(qp_node->cb_bindings,
+                                 {reinterpret_cast<uint64_t &>(queryPool), VK_DEBUG_REPORT_OBJECT_TYPE_QUERY_POOL_EXT});
+        dev_data->queryPoolMap.erase(queryPool);
+    }
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL GetQueryPoolResults(VkDevice device, VkQueryPool queryPool, uint32_t firstQuery,
@@ -8173,6 +8197,8 @@ CmdBeginQuery(VkCommandBuffer commandBuffer, VkQueryPool queryPool, uint32_t slo
             pCB->startedQueries.insert(query);
         }
         skip_call |= addCmd(dev_data, pCB, CMD_BEGINQUERY, "vkCmdBeginQuery()");
+        addCommandBufferBinding(&getQueryPoolNode(dev_data, queryPool)->cb_bindings,
+                                {reinterpret_cast<uint64_t &>(queryPool), VK_DEBUG_REPORT_OBJECT_TYPE_QUERY_POOL_EXT}, pCB);
     }
     lock.unlock();
     if (!skip_call)
@@ -8201,6 +8227,8 @@ VKAPI_ATTR void VKAPI_CALL CmdEndQuery(VkCommandBuffer commandBuffer, VkQueryPoo
         } else {
             skip_call |= report_error_no_cb_begin(dev_data, commandBuffer, "vkCmdEndQuery()");
         }
+        addCommandBufferBinding(&getQueryPoolNode(dev_data, queryPool)->cb_bindings,
+                                {reinterpret_cast<uint64_t &>(queryPool), VK_DEBUG_REPORT_OBJECT_TYPE_QUERY_POOL_EXT}, pCB);
     }
     lock.unlock();
     if (!skip_call)
@@ -8226,6 +8254,8 @@ CmdResetQueryPool(VkCommandBuffer commandBuffer, VkQueryPool queryPool, uint32_t
             skip_call |= report_error_no_cb_begin(dev_data, commandBuffer, "vkCmdResetQueryPool()");
         }
         skip_call |= insideRenderPass(dev_data, pCB, "vkCmdQueryPool");
+        addCommandBufferBinding(&getQueryPoolNode(dev_data, queryPool)->cb_bindings,
+                                {reinterpret_cast<uint64_t &>(queryPool), VK_DEBUG_REPORT_OBJECT_TYPE_QUERY_POOL_EXT}, pCB);
     }
     lock.unlock();
     if (!skip_call)
@@ -8295,6 +8325,8 @@ CmdCopyQueryPoolResults(VkCommandBuffer commandBuffer, VkQueryPool queryPool, ui
             skip_call |= report_error_no_cb_begin(dev_data, commandBuffer, "vkCmdCopyQueryPoolResults()");
         }
         skip_call |= insideRenderPass(dev_data, cb_node, "vkCmdCopyQueryPoolResults");
+        addCommandBufferBinding(&getQueryPoolNode(dev_data, queryPool)->cb_bindings,
+                                {reinterpret_cast<uint64_t &>(queryPool), VK_DEBUG_REPORT_OBJECT_TYPE_QUERY_POOL_EXT}, cb_node);
     } else {
         assert(0);
     }
