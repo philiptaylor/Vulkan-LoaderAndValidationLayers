@@ -6327,6 +6327,60 @@ TEST_F(VkLayerTest, InvalidCmdBufferQueryPoolDestroyed) {
     m_errorMonitor->VerifyFound();
 }
 
+TEST_F(VkLayerTest, InvalidCmdBufferPipelineDestroyed) {
+    TEST_DESCRIPTION("Attempt to draw with a command buffer that is invalid "
+                     "due to a pipeline dependency being destroyed.");
+    ASSERT_NO_FATAL_FAILURE(InitState());
+    // Using a compute pipeline b/c it's simpler to create
+    char const *csSource =
+        "#version 450\n"
+        "\n"
+        "layout(local_size_x=1) in;\n"
+        "layout(set=0, binding=0) buffer block { vec4 x; };\n"
+        "void main(){\n"
+        "   // x is not used.\n"
+        "}\n";
+
+    VkShaderObj cs(m_device, csSource, VK_SHADER_STAGE_COMPUTE_BIT, this);
+
+    VkDescriptorSetObj descriptorSet(m_device);
+    descriptorSet.CreateVKDescriptorSet(m_commandBuffer);
+
+    VkComputePipelineCreateInfo cpci = {
+        VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+        nullptr,
+        0,
+        {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0,
+         VK_SHADER_STAGE_COMPUTE_BIT, cs.handle(), "main", nullptr},
+        descriptorSet.GetPipelineLayout(),
+        VK_NULL_HANDLE,
+        -1};
+
+    VkPipeline pipe;
+    VkResult result = vkCreateComputePipelines(
+        m_device->device(), VK_NULL_HANDLE, 1, &cpci, nullptr, &pipe);
+    ASSERT_VK_SUCCESS(result);
+
+    m_commandBuffer->BeginCommandBuffer();
+    vkCmdBindPipeline(m_commandBuffer->GetBufferHandle(),
+                      VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
+    m_commandBuffer->EndCommandBuffer();
+    // Now destroy pipeline in order to cause error when submitting
+    vkDestroyPipeline(m_device->device(), pipe, nullptr);
+
+    m_errorMonitor->SetDesiredFailureMsg(
+        VK_DEBUG_REPORT_ERROR_BIT_EXT,
+        " that is invalid because bound pipeline ");
+
+    VkSubmitInfo submit_info = {};
+    submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit_info.commandBufferCount = 1;
+    submit_info.pCommandBuffers = &m_commandBuffer->handle();
+    vkQueueSubmit(m_device->m_queue, 1, &submit_info, VK_NULL_HANDLE);
+
+    m_errorMonitor->VerifyFound();
+}
+
 TEST_F(VkLayerTest, InvalidPipeline) {
     // Attempt to bind an invalid Pipeline to a valid Command Buffer
     // ObjectTracker should catch this.
