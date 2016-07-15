@@ -253,8 +253,8 @@ static void CreateDispatchableObject(T1 dispatchable_object, T2 object, VkDebugR
     OBJTRACK_NODE *pNewObjNode = new OBJTRACK_NODE;
     pNewObjNode->object_type = object_type;
     pNewObjNode->status = OBJSTATUS_NONE;
-    pNewObjNode->handle = reinterpret_cast<uint64_t &>(object);
-    instance_data->object_map[object_type][reinterpret_cast<uint64_t &>(object)] = pNewObjNode;
+    pNewObjNode->handle = reinterpret_cast<uint64_t>(object);
+    instance_data->object_map[object_type][reinterpret_cast<uint64_t>(object)] = pNewObjNode;
     instance_data->num_objects[object_type]++;
     instance_data->num_total_objects++;
 }
@@ -280,7 +280,7 @@ template <typename T1, typename T2>
 static void DestroyDispatchableObject(T1 dispatchable_object, T2 object, VkDebugReportObjectTypeEXT object_type) {
     layer_data *instance_data = get_my_data_ptr(get_dispatch_key(dispatchable_object), layer_data_map);
 
-    uint64_t object_handle = reinterpret_cast<uint64_t &>(object);
+    uint64_t object_handle = reinterpret_cast<uint64_t>(object);
 
     auto item = instance_data->object_map[object_type].find(object_handle);
     if (item != instance_data->object_map[object_type].end()) {
@@ -347,7 +347,7 @@ static bool ValidateDispatchableObject(T1 dispatchable_object, T2 object, VkDebu
     if (instance_data->object_map[object_type].find(reinterpret_cast<uint64_t>(object)) ==
         instance_data->object_map[object_type].end()) {
         return log_msg(instance_data->report_data, VK_DEBUG_REPORT_ERROR_BIT_EXT, object_type, reinterpret_cast<uint64_t>(object),
-                       __LINE__, OBJTRACK_INVALID_OBJECT, LayerName, "Invalid %s Object 0x%" PRIx64, object_name[object_type],
+                       __LINE__, OBJTRACK_INVALID_OBJECT, LayerName, "Invalid %s Object 0x%" PRIxLEAST64, object_name[object_type],
                        reinterpret_cast<uint64_t>(object));
     }
     return false;
