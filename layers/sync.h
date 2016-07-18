@@ -790,8 +790,7 @@ struct SyncNode
     ENodeType type;
 
     CommandId commandId;
-    VkPipelineStageFlagBits stage;
-
+    VkPipelineStageFlags stages;
     VkAccessFlags accesses;
     MemRegion memory;
 

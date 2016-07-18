@@ -134,7 +134,7 @@ void MemRegion::to_string(std::ostream &str) const
 static const VkPipelineStageFlagBits VIRTUAL_PIPELINE_STAGE_TRANSITION_BIT = (VkPipelineStageFlagBits)0x10000000;
 static const VkAccessFlagBits VIRTUAL_ACCESS_TRANSITION_BIT = (VkAccessFlagBits)0x10000000;
 
-SyncNode::SyncNode() : type(INVALID), stage((VkPipelineStageFlagBits)0), accesses(0)
+SyncNode::SyncNode() : type(INVALID), stages(0), accesses(0)
 {
 }
 
@@ -142,7 +142,7 @@ bool SyncNode::operator<(const SyncNode &n) const
 {
     CMP(type, n.type);
     CMP(commandId, n.commandId);
-    CMP(stage, n.stage);
+    CMP(stages, n.stages);
     CMP(accesses, n.accesses);
     CMP(memory, n.memory);
     return false;
@@ -190,27 +190,33 @@ void SyncNode::to_string(std::ostream &str) const
     case MEM_INVALIDATE:
         str << " stages=[";
 
-        switch (stage)
+        for (VkFlags stage = 1; stage < 0x80000000; stage <<= 1)
         {
+            if (stages & stage)
+            {
+                switch (stage)
+                {
 #define X(n) case VK_PIPELINE_STAGE_##n##_BIT: str << " " #n; break;
-            X(TOP_OF_PIPE);
-            X(DRAW_INDIRECT);
-            X(VERTEX_INPUT);
-            X(VERTEX_SHADER);
-            X(TESSELLATION_CONTROL_SHADER);
-            X(TESSELLATION_EVALUATION_SHADER);
-            X(GEOMETRY_SHADER);
-            X(FRAGMENT_SHADER);
-            X(EARLY_FRAGMENT_TESTS);
-            X(LATE_FRAGMENT_TESTS);
-            X(COLOR_ATTACHMENT_OUTPUT);
-            X(COMPUTE_SHADER);
-            X(TRANSFER);
-            X(BOTTOM_OF_PIPE);
-            X(HOST);
+                X(TOP_OF_PIPE);
+                X(DRAW_INDIRECT);
+                X(VERTEX_INPUT);
+                X(VERTEX_SHADER);
+                X(TESSELLATION_CONTROL_SHADER);
+                X(TESSELLATION_EVALUATION_SHADER);
+                X(GEOMETRY_SHADER);
+                X(FRAGMENT_SHADER);
+                X(EARLY_FRAGMENT_TESTS);
+                X(LATE_FRAGMENT_TESTS);
+                X(COLOR_ATTACHMENT_OUTPUT);
+                X(COMPUTE_SHADER);
+                X(TRANSFER);
+                X(BOTTOM_OF_PIPE);
+                X(HOST);
 #undef X
-        case VIRTUAL_PIPELINE_STAGE_TRANSITION_BIT: str << " TRANSITION"; break;
-        default: str << " " << std::hex << stage << std::dec; break;
+                case VIRTUAL_PIPELINE_STAGE_TRANSITION_BIT: str << " TRANSITION"; break;
+                default: str << " " << std::hex << stage << std::dec; break;
+                }
+            }
         }
 
         str << " ]";
@@ -253,7 +259,7 @@ void SyncNode::to_string(std::ostream &str) const
                 X(MEMORY_WRITE);
 #undef X
                 case VIRTUAL_ACCESS_TRANSITION_BIT: str << " TRANSITION"; break;
-                default: str << " " << std::hex << stage << std::dec; break;
+                default: str << " " << std::hex << access << std::dec; break;
                 }
             }
         }
@@ -460,7 +466,7 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
                 {
                     if (pipelineBarrier->srcStageMask & stage)
                     {
-                        srcStageNode.stage = stage;
+                        srcStageNode.stages = stage;
 
                         uint64_t srcStageNodeId = addNode(srcStageNode);
                         mEdges.insert(SyncEdge(srcStageNodeId, srcNodeId));
@@ -470,7 +476,7 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
 
                     if (pipelineBarrier->dstStageMask & stage)
                     {
-                        dstStageNode.stage = stage;
+                        dstStageNode.stages = stage;
 
                         uint64_t dstStageNodeId = addNode(dstStageNode);
                         mEdges.insert(SyncEdge(dstNodeId, dstStageNodeId));
@@ -505,23 +511,30 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
                 srcMemNode.memory.type = MemRegion::IMAGE;
                 srcMemNode.memory.image = imgMemBarrier.image;
                 srcMemNode.memory.imageSubresourceRange = imgMemBarrier.subresourceRange;
+                srcMemNode.stages = pipelineBarrier->srcStageMask;
                 srcMemNode.accesses = imgMemBarrier.srcAccessMask;
-                // XXX: does this need a stage or not?
 
                 dstMemNode.type = SyncNode::MEM_INVALIDATE;
                 dstMemNode.commandId = commandId;
                 dstMemNode.memory.type = MemRegion::IMAGE;
                 dstMemNode.memory.image = imgMemBarrier.image;
                 dstMemNode.memory.imageSubresourceRange = imgMemBarrier.subresourceRange;
+                dstMemNode.stages = pipelineBarrier->dstStageMask;
                 dstMemNode.accesses = imgMemBarrier.dstAccessMask;
 
-                uint64_t srcMemNodeId = addNode(srcMemNode);
-                mEdges.insert(SyncEdge(srcNodeId, srcMemNodeId));
-                mEdges.insert(SyncEdge(srcMemNodeId, preTransNodeId));
+                if (srcMemNode.accesses != 0)
+                {
+                    uint64_t srcMemNodeId = addNode(srcMemNode);
+                    mEdges.insert(SyncEdge(srcNodeId, srcMemNodeId));
+                    mEdges.insert(SyncEdge(srcMemNodeId, preTransNodeId));
+                }
 
-                uint64_t dstMemNodeId = addNode(dstMemNode);
-                mEdges.insert(SyncEdge(postTransNodeId, dstMemNodeId));
-                mEdges.insert(SyncEdge(dstMemNodeId, dstNodeId));
+                if (dstMemNode.accesses != 0)
+                {
+                    uint64_t dstMemNodeId = addNode(dstMemNode);
+                    mEdges.insert(SyncEdge(postTransNodeId, dstMemNodeId));
+                    mEdges.insert(SyncEdge(dstMemNodeId, dstNodeId));
+                }
 
                 if (imgMemBarrier.newLayout != imgMemBarrier.oldLayout)
                 {
@@ -531,7 +544,7 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
                     transNode.memory.type = MemRegion::IMAGE;
                     transNode.memory.image = imgMemBarrier.image;
                     transNode.memory.imageSubresourceRange = imgMemBarrier.subresourceRange;
-                    transNode.stage = VIRTUAL_PIPELINE_STAGE_TRANSITION_BIT;
+                    transNode.stages = VIRTUAL_PIPELINE_STAGE_TRANSITION_BIT;
                     transNode.accesses = VIRTUAL_ACCESS_TRANSITION_BIT;
 
                     uint64_t transNodeId = addNode(transNode);
@@ -600,8 +613,8 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
                 SyncNode n1, n2, n3;
                 n1.type = n2.type = n3.type = SyncNode::ACTION_CMD_STAGE;
                 n1.commandId = n2.commandId = n3.commandId = commandId;
-                n1.stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-                n3.stage = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+                n1.stages = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+                n3.stages = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
 
                 uint64_t id1 = addNode(n1);
                 uint64_t id3 = addNode(n3);
@@ -621,7 +634,7 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
                     VK_PIPELINE_STAGE_TRANSFER_BIT,
                 })
                 {
-                    n2.stage = stage;
+                    n2.stages = stage;
                     uint64_t id2 = addNode(n2);
 
                     mEdges.insert(SyncEdge(id1, id2));
@@ -756,7 +769,7 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
 
                             for (auto stage : pipelineStages)
                             {
-                                node.stage = stageNode.stage = stage;
+                                node.stages = stageNode.stages = stage;
 
                                 // XXX: handle the access types
 
@@ -844,7 +857,7 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
 
                             for (auto stage : pipelineStages)
                             {
-                                node.stage = stageNode.stage = stage;
+                                node.stages = stageNode.stages = stage;
 
                                 // XXX: handle the access types properly
                                 // (TODO: is UNIFORM_TEXEL_BUFFER using ACCESS_UNIFORM_READ?)
@@ -930,7 +943,7 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
 
                             for (auto stage : pipelineStages)
                             {
-                                node.stage = stageNode.stage = stage;
+                                node.stages = stageNode.stages = stage;
 
                                 // XXX: handle the access types properly
 
