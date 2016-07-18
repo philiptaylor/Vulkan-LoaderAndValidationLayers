@@ -32,6 +32,7 @@
 #include <vector>
 #include <memory>
 
+class sync_cmd_pipeline_barrier;
 class sync_cmd_begin_render_pass;
 class sync_cmd_next_subpass;
 class sync_cmd_end_render_pass;
@@ -67,6 +68,8 @@ public:
     virtual ~sync_cmd_base() { }
 
     virtual bool is_draw() const { return false; }
+
+    virtual const sync_cmd_pipeline_barrier *as_pipeline_barrier() const { return nullptr; }
 
     virtual const sync_cmd_begin_render_pass *as_begin_render_pass() const { return nullptr; }
     virtual const sync_cmd_next_subpass *as_next_subpass() const { return nullptr; }
@@ -290,6 +293,7 @@ public:
     }
 
     virtual void to_string(std::ostream &str) override;
+    virtual const sync_cmd_pipeline_barrier *as_pipeline_barrier() const { return this; }
 
     VkPipelineStageFlags srcStageMask;
     VkPipelineStageFlags dstStageMask;
@@ -569,6 +573,8 @@ struct sync_image
 {
     VkImage image;
 
+    bool isSwapchain;
+
     VkImageCreateFlags flags;
     VkImageType imageType;
     VkFormat format;
@@ -667,6 +673,18 @@ struct sync_graphics_pipeline
 };
 
 /**
+ * Internal state for a VkSwapchainKHR.
+ */
+struct sync_swapchain
+{
+    VkSwapchainKHR swapchain;
+
+    std::vector<VkImage> images;
+
+//     void to_string(std::ostream &str);
+};
+
+/**
  * Internal state for a VkDevice.
  */
 struct sync_device
@@ -703,9 +721,111 @@ struct sync_device
 
     std::map<VkPipeline, sync_graphics_pipeline> graphics_pipelines;
 
+    std::map<VkSwapchainKHR, sync_swapchain> swapchains;
+
     uint64_t nextMemoryUid;
 
     std::unique_ptr<SyncValidator> mSyncValidator;
+};
+
+
+
+struct CommandId
+{
+    static const uint64_t SUBPASS_NONE = ~(uint64_t)0;
+
+    uint64_t queueId;
+    uint64_t subpassId;
+    uint64_t sequenceId;
+
+    CommandId();
+    bool operator<(const CommandId &c) const;
+};
+
+struct MemRegion
+{
+    enum EType
+    {
+        INVALID,
+        GLOBAL,
+        BUFFER,
+        IMAGE,
+    };
+
+    EType type;
+
+    // If BUFFER:
+    VkBuffer buffer;
+    VkDeviceSize bufferOffset;
+    VkDeviceSize bufferRange;
+
+    // If IMAGE:
+    VkImage image;
+    VkImageSubresourceRange imageSubresourceRange;
+
+    MemRegion();
+    bool operator<(const MemRegion &m) const;
+    void to_string(std::ostream &str) const;
+};
+
+struct SyncNode
+{
+    enum ENodeType
+    {
+        INVALID,
+        ACTION_CMD_STAGE,
+        SYNC_CMD_SRC_STAGE,
+        SYNC_CMD_DST_STAGE,
+        SYNC_CMD_SRC,
+        SYNC_CMD_DST,
+        SYNC_CMD_POST_TRANS,
+        SYNC_CMD_PRE_TRANS,
+        TRANSITION, // XXX - not needed?
+        MEM_READ,
+        MEM_WRITE,
+        MEM_FLUSH,
+        MEM_INVALIDATE,
+    };
+
+    ENodeType type;
+
+    CommandId commandId;
+    VkPipelineStageFlagBits stage;
+
+    VkAccessFlags accesses;
+    MemRegion memory;
+
+    SyncNode();
+    bool operator<(const SyncNode &n) const;
+    void to_string(std::ostream &str) const;
+};
+
+struct SyncEdge
+{
+    // Node IDs
+    uint64_t a;
+    uint64_t b;
+
+    SyncEdge(uint64_t a, uint64_t b) : a(a), b(b) { }
+
+    bool operator<(const SyncEdge &e) const;
+};
+
+struct SyncEdgeSet
+{
+    // Node ID of sync command node
+    uint64_t sync;
+
+    // Exclusive upper/lower bound of set of commands
+    CommandId commandBound;
+    VkPipelineStageFlagBits stage;
+
+    SyncEdgeSet(uint64_t sync, CommandId commandBound, VkPipelineStageFlagBits stage) :
+        sync(sync), commandBound(commandBound), stage(stage)
+    {
+    }
+
+    bool operator<(const SyncEdgeSet &e) const;
 };
 
 class SyncValidator
@@ -718,6 +838,18 @@ public:
 private:
     sync_device &mSyncDevice;
     debug_report_data *mReportData;
+
+    CommandId mNextCommandId;
+    uint64_t mNextSubpassId;
+    uint64_t mNextNodeId;
+
+    std::map<SyncNode, uint64_t> mNodeIds;
+    std::map<uint64_t, SyncNode> mNodesById;
+    std::set<SyncEdge> mEdges;
+    std::set<SyncEdgeSet> mPrecedingEdges;
+    std::set<SyncEdgeSet> mFollowingEdges;
+
+    uint64_t addNode(const SyncNode &node);
 };
 
 #endif // INCLUDED_VULKAN_SYNC_H

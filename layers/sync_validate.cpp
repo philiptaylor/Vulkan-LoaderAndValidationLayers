@@ -67,215 +67,172 @@
 
 #define CMP(a, b) do { if (a < b) return true; if (b < a) return false; } while (0)
 
-struct CommandId
+CommandId::CommandId() : queueId(0), subpassId(0), sequenceId(0) { }
+
+bool CommandId::operator<(const CommandId &c) const
 {
-    static const uint64_t SUBPASS_NONE = ~(uint64_t)0;
+    CMP(queueId, c.queueId);
+    CMP(subpassId, c.subpassId);
+    CMP(sequenceId, c.sequenceId);
+    return false;
+}
 
-    uint64_t queueId;
-    uint64_t subpassId;
-    uint64_t sequenceId;
-
-    CommandId() : queueId(0), subpassId(0), sequenceId(0) { }
-
-    bool operator<(const CommandId &c) const
-    {
-        CMP(queueId, c.queueId);
-        CMP(subpassId, c.subpassId);
-        CMP(sequenceId, c.sequenceId);
-        return false;
-    }
-};
-
-struct MemRegion
+MemRegion::MemRegion() : type(INVALID),
+    buffer(VK_NULL_HANDLE), bufferOffset(0), bufferRange(0),
+    image(VK_NULL_HANDLE), imageSubresourceRange()
 {
-    enum EType
-    {
-        INVALID,
-        GLOBAL,
-        BUFFER,
-        IMAGE,
-    };
+}
 
-    EType type;
-
-    // If BUFFER:
-    VkBuffer buffer;
-    VkDeviceSize bufferOffset;
-    VkDeviceSize bufferRange;
-
-    // If IMAGE:
-    VkImage image;
-    VkImageSubresourceRange imageSubresourceRange;
-
-    MemRegion() : type(INVALID),
-        buffer(VK_NULL_HANDLE), bufferOffset(0), bufferRange(0),
-        image(VK_NULL_HANDLE), imageSubresourceRange()
-    {
-    }
-
-    bool operator<(const MemRegion &m) const
-    {
-        CMP(type, m.type);
-        CMP(buffer, m.buffer);
-        CMP(bufferOffset, m.bufferOffset);
-        CMP(bufferRange, m.bufferRange);
-        CMP(image, m.image);
-        CMP(imageSubresourceRange.aspectMask, m.imageSubresourceRange.aspectMask);
-        CMP(imageSubresourceRange.baseMipLevel, m.imageSubresourceRange.baseMipLevel);
-        CMP(imageSubresourceRange.levelCount, m.imageSubresourceRange.levelCount);
-        CMP(imageSubresourceRange.baseArrayLayer, m.imageSubresourceRange.baseArrayLayer);
-        CMP(imageSubresourceRange.layerCount, m.imageSubresourceRange.layerCount);
-        return false;
-    }
-
-    void to_string(std::ostream &str) const
-    {
-        str << "{";
-
-        switch (type)
-        {
-        case INVALID:
-            str << " INVALID";
-            break;
-        case GLOBAL:
-            str << " GLOBAL";
-            break;
-        case BUFFER:
-            str << " BUFFER";
-            str << " " << (void *)buffer;
-            str << " offset=" << bufferOffset;
-            str << " range=" << bufferRange;
-            break;
-        case IMAGE:
-            str << " IMAGE";
-            str << " " << (void *)image;
-            str << " aspectMask=0x" << std::hex << imageSubresourceRange.aspectMask << std::dec;
-            str << " baseMipLevel=" << imageSubresourceRange.baseMipLevel;
-            str << " levelCount=" << imageSubresourceRange.levelCount;
-            str << " baseArrayLayer=" << imageSubresourceRange.baseArrayLayer;
-            str << " layerCount=" << imageSubresourceRange.layerCount;
-            break;
-        }
-
-        str << " }";
-    }
-};
-
-struct SyncNode
+bool MemRegion::operator<(const MemRegion &m) const
 {
-    enum ENodeType
+    CMP(type, m.type);
+    CMP(buffer, m.buffer);
+    CMP(bufferOffset, m.bufferOffset);
+    CMP(bufferRange, m.bufferRange);
+    CMP(image, m.image);
+    CMP(imageSubresourceRange.aspectMask, m.imageSubresourceRange.aspectMask);
+    CMP(imageSubresourceRange.baseMipLevel, m.imageSubresourceRange.baseMipLevel);
+    CMP(imageSubresourceRange.levelCount, m.imageSubresourceRange.levelCount);
+    CMP(imageSubresourceRange.baseArrayLayer, m.imageSubresourceRange.baseArrayLayer);
+    CMP(imageSubresourceRange.layerCount, m.imageSubresourceRange.layerCount);
+    return false;
+}
+
+void MemRegion::to_string(std::ostream &str) const
+{
+    str << "{";
+
+    switch (type)
     {
-        INVALID,
-        ACTION_CMD_STAGE,
-        SYNC_CMD_SRC_STAGE,
-        SYNC_CMD_DST_STAGE,
-        SYNC_CMD_SRC,
-        SYNC_CMD_DST,
-        SYNC_CMD_POST_TRANS,
-        SYNC_CMD_PRE_TRANS,
-        TRANSITION,
-        MEM_READ,
-        MEM_WRITE,
-        MEM_FLUSH,
-        MEM_INVALIDATE,
-    };
-
-    ENodeType type;
-
-    CommandId commandId;
-    VkPipelineStageFlagBits stage;
-
-    VkAccessFlagBits access;
-    MemRegion memory;
-
-    SyncNode() : type(INVALID), stage((VkPipelineStageFlagBits)0), access((VkAccessFlagBits)0)
-    {
+    case INVALID:
+        str << " INVALID";
+        break;
+    case GLOBAL:
+        str << " GLOBAL";
+        break;
+    case BUFFER:
+        str << " BUFFER";
+        str << " " << (void *)buffer;
+        str << " offset=" << bufferOffset;
+        str << " range=" << bufferRange;
+        break;
+    case IMAGE:
+        str << " IMAGE";
+        str << " " << (void *)image;
+        str << " aspectMask=0x" << std::hex << imageSubresourceRange.aspectMask << std::dec;
+        str << " baseMipLevel=" << imageSubresourceRange.baseMipLevel;
+        str << " levelCount=" << imageSubresourceRange.levelCount;
+        str << " baseArrayLayer=" << imageSubresourceRange.baseArrayLayer;
+        str << " layerCount=" << imageSubresourceRange.layerCount;
+        break;
     }
 
-    bool operator<(const SyncNode &n) const
+    str << " }";
+}
+
+
+static const VkPipelineStageFlagBits VIRTUAL_PIPELINE_STAGE_TRANSITION_BIT = (VkPipelineStageFlagBits)0x10000000;
+static const VkAccessFlagBits VIRTUAL_ACCESS_TRANSITION_BIT = (VkAccessFlagBits)0x10000000;
+
+SyncNode::SyncNode() : type(INVALID), stage((VkPipelineStageFlagBits)0), accesses(0)
+{
+}
+
+bool SyncNode::operator<(const SyncNode &n) const
+{
+    CMP(type, n.type);
+    CMP(commandId, n.commandId);
+    CMP(stage, n.stage);
+    CMP(accesses, n.accesses);
+    CMP(memory, n.memory);
+    return false;
+}
+
+void SyncNode::to_string(std::ostream &str) const
+{
+    str << "{";
+
+    str << " ";
+    switch (type)
     {
-        CMP(type, n.type);
-        CMP(commandId, n.commandId);
-        CMP(stage, n.stage);
-        CMP(access, n.access);
-        CMP(memory, n.memory);
-        return false;
+    case INVALID: str << "INVALID"; break;
+    case ACTION_CMD_STAGE: str << "ACTION_CMD_STAGE"; break;
+    case SYNC_CMD_SRC_STAGE: str << "SYNC_CMD_SRC_STAGE"; break;
+    case SYNC_CMD_DST_STAGE: str << "SYNC_CMD_DST_STAGE"; break;
+    case SYNC_CMD_SRC: str << "SYNC_CMD_SRC"; break;
+    case SYNC_CMD_DST: str << "SYNC_CMD_DST"; break;
+    case SYNC_CMD_POST_TRANS: str << "SYNC_CMD_POST_TRANS"; break;
+    case SYNC_CMD_PRE_TRANS: str << "SYNC_CMD_PRE_TRANS"; break;
+    case TRANSITION: str << "TRANSITION"; break;
+    case MEM_READ: str << "MEM_READ"; break;
+    case MEM_WRITE: str << "MEM_WRITE"; break;
+    case MEM_FLUSH: str << "MEM_FLUSH"; break;
+    case MEM_INVALIDATE: str << "MEM_INVALIDATE"; break;
     }
 
-    void to_string(std::ostream &str) const
+    str << " {";
+    str << " queueId=" << commandId.queueId;
+    if (commandId.subpassId == CommandId::SUBPASS_NONE)
+        str << " subpassId=NONE";
+    else
+        str << " subpassId=" << commandId.queueId;
+    str << " sequenceId=" << commandId.sequenceId;
+    str << " }";
+
+    switch (type)
     {
-        str << "{";
+    case ACTION_CMD_STAGE:
+    case SYNC_CMD_SRC_STAGE:
+    case SYNC_CMD_DST_STAGE:
+    case MEM_READ:
+    case MEM_WRITE:
+    case MEM_FLUSH:
+    case MEM_INVALIDATE:
+        str << " stages=[";
 
-        str << " ";
-        switch (type)
+        switch (stage)
         {
-        case INVALID: str << "INVALID"; break;
-        case ACTION_CMD_STAGE: str << "ACTION_CMD_STAGE"; break;
-        case SYNC_CMD_SRC_STAGE: str << "SYNC_CMD_SRC_STAGE"; break;
-        case SYNC_CMD_DST_STAGE: str << "SYNC_CMD_DST_STAGE"; break;
-        case SYNC_CMD_SRC: str << "SYNC_CMD_SRC"; break;
-        case SYNC_CMD_DST: str << "SYNC_CMD_DST"; break;
-        case SYNC_CMD_POST_TRANS: str << "SYNC_CMD_POST_TRANS"; break;
-        case SYNC_CMD_PRE_TRANS: str << "SYNC_CMD_PRE_TRANS"; break;
-        case TRANSITION: str << "TRANSITION"; break;
-        case MEM_READ: str << "MEM_READ"; break;
-        case MEM_WRITE: str << "MEM_WRITE"; break;
-        case MEM_FLUSH: str << "MEM_FLUSH"; break;
-        case MEM_INVALIDATE: str << "MEM_INVALIDATE"; break;
-        }
-
-        str << " {";
-        str << " queueId=" << commandId.queueId;
-        if (commandId.subpassId == CommandId::SUBPASS_NONE)
-            str << " subpassId=NONE";
-        else
-            str << " subpassId=" << commandId.queueId;
-        str << " sequenceId=" << commandId.sequenceId;
-        str << " }";
-
-        switch (type)
-        {
-        case ACTION_CMD_STAGE:
-        case SYNC_CMD_SRC_STAGE:
-        case SYNC_CMD_DST_STAGE:
-        case MEM_READ:
-        case MEM_WRITE:
-        case MEM_FLUSH:
-        case MEM_INVALIDATE:
-            switch (stage)
-            {
 #define X(n) case VK_PIPELINE_STAGE_##n##_BIT: str << " " #n; break;
-                X(TOP_OF_PIPE);
-                X(DRAW_INDIRECT);
-                X(VERTEX_INPUT);
-                X(VERTEX_SHADER);
-                X(TESSELLATION_CONTROL_SHADER);
-                X(TESSELLATION_EVALUATION_SHADER);
-                X(GEOMETRY_SHADER);
-                X(FRAGMENT_SHADER);
-                X(EARLY_FRAGMENT_TESTS);
-                X(LATE_FRAGMENT_TESTS);
-                X(COLOR_ATTACHMENT_OUTPUT);
-                X(COMPUTE_SHADER);
-                X(TRANSFER);
-                X(BOTTOM_OF_PIPE);
-                X(HOST);
+            X(TOP_OF_PIPE);
+            X(DRAW_INDIRECT);
+            X(VERTEX_INPUT);
+            X(VERTEX_SHADER);
+            X(TESSELLATION_CONTROL_SHADER);
+            X(TESSELLATION_EVALUATION_SHADER);
+            X(GEOMETRY_SHADER);
+            X(FRAGMENT_SHADER);
+            X(EARLY_FRAGMENT_TESTS);
+            X(LATE_FRAGMENT_TESTS);
+            X(COLOR_ATTACHMENT_OUTPUT);
+            X(COMPUTE_SHADER);
+            X(TRANSFER);
+            X(BOTTOM_OF_PIPE);
+            X(HOST);
 #undef X
-            default: str << " " << std::hex << stage << std::dec; break;
-            }
-            break;
-        default:
-            break;
+        case VIRTUAL_PIPELINE_STAGE_TRANSITION_BIT: str << " TRANSITION"; break;
+        default: str << " " << std::hex << stage << std::dec; break;
         }
 
-        switch (type)
+        str << " ]";
+        break;
+    default:
+        break;
+    }
+
+    switch (type)
+    {
+    case MEM_READ:
+    case MEM_WRITE:
+    case MEM_FLUSH:
+    case MEM_INVALIDATE:
+        str << " accesses=[";
+
+        for (VkFlags access = 1; access < 0x80000000; access <<= 1)
         {
-        case MEM_READ:
-        case MEM_WRITE:
-        case MEM_FLUSH:
-        case MEM_INVALIDATE:
-            switch (access)
+            if (accesses & access)
             {
+                switch (access)
+                {
 #define X(n) case VK_ACCESS_##n##_BIT: str << " " #n; break;
                 X(INDIRECT_COMMAND_READ);
                 X(INDEX_READ);
@@ -295,36 +252,37 @@ struct SyncNode
                 X(MEMORY_READ);
                 X(MEMORY_WRITE);
 #undef X
-            default: str << " " << std::hex << stage << std::dec; break;
+                case VIRTUAL_ACCESS_TRANSITION_BIT: str << " TRANSITION"; break;
+                default: str << " " << std::hex << stage << std::dec; break;
+                }
             }
-
-            str << " ";
-            memory.to_string(str);
-            break;
-
-        default:
-            break;
         }
 
-        str << " }";
+        str << " ] ";
+        memory.to_string(str);
+        break;
+
+    default:
+        break;
     }
 
-};
+    str << " }";
+}
 
-struct SyncEdge
+bool SyncEdge::operator<(const SyncEdge &e) const
 {
-    SyncNode a;
-    SyncNode b;
+    CMP(a, e.a);
+    CMP(b, e.b);
+    return false;
+}
 
-    SyncEdge(SyncNode a, SyncNode b) : a(a), b(b) { }
-
-    bool operator<(const SyncEdge &e) const
-    {
-        CMP(a, e.a);
-        CMP(b, e.b);
-        return false;
-    }
-};
+bool SyncEdgeSet::operator<(const SyncEdgeSet &e) const
+{
+    CMP(sync, e.sync);
+    CMP(commandBound, e.commandBound);
+    CMP(stage, e.stage);
+    return false;
+}
 
 #undef CMP
 
@@ -332,6 +290,12 @@ struct SyncEdge
 SyncValidator::SyncValidator(sync_device &syncDevice, debug_report_data *reportData)
     : mSyncDevice(syncDevice), mReportData(reportData)
 {
+    mNextNodeId = 0;
+    mNextSubpassId = 0;
+
+    mNextCommandId.queueId = 0;
+    mNextCommandId.subpassId = CommandId::SUBPASS_NONE;
+    mNextCommandId.sequenceId = 0;
 }
 
 bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& buf)
@@ -350,27 +314,18 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
     std::map<uint32_t, Binding> graphicsBindings;
     std::map<uint32_t, Binding> computeBindings;
 
-    CommandId nextCommandId;
-    nextCommandId.queueId = 0;
-    nextCommandId.subpassId = CommandId::SUBPASS_NONE;
-    nextCommandId.sequenceId = 0;
-    uint64_t nextSubpassId = 0;
-
-    std::set<SyncNode> memNodes;
-    std::set<SyncEdge> edges;
-
     for (auto &cmd : buf.commands)
     {
         // TODO: reset state on vkCmdExecuteCommands
 
         if (cmd->as_begin_render_pass() || cmd->as_next_subpass())
         {
-            nextCommandId.subpassId = nextSubpassId++;
+            mNextCommandId.subpassId = mNextSubpassId++;
         }
 
         if (cmd->as_end_render_pass())
         {
-            nextCommandId.subpassId = CommandId::SUBPASS_NONE;
+            mNextCommandId.subpassId = CommandId::SUBPASS_NONE;
         }
 
         auto bindPipeline = cmd->as_bind_pipeline();
@@ -412,10 +367,187 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
 
         // XXX: handle vkCmdBindIndexBuffer
 
+        if (cmd->as_pipeline_barrier())
+        {
+            auto pipelineBarrier = cmd->as_pipeline_barrier();
+
+            CommandId commandId = mNextCommandId;
+            mNextCommandId.sequenceId++;
+
+            SyncNode srcNode, preTransNode, postTransNode, dstNode;
+
+            srcNode.type = SyncNode::SYNC_CMD_SRC;
+            preTransNode.type = SyncNode::SYNC_CMD_PRE_TRANS;
+            postTransNode.type = SyncNode::SYNC_CMD_POST_TRANS;
+            dstNode.type = SyncNode::SYNC_CMD_DST;
+
+            srcNode.commandId = preTransNode.commandId = postTransNode.commandId = dstNode.commandId = commandId;
+
+            uint64_t srcNodeId = addNode(srcNode);
+            uint64_t preTransNodeId = addNode(preTransNode);
+            uint64_t postTransNodeId = addNode(postTransNode);
+            uint64_t dstNodeId = addNode(dstNode);
+
+            mEdges.insert(SyncEdge(srcNodeId, preTransNodeId));
+            mEdges.insert(SyncEdge(preTransNodeId, postTransNodeId));
+            mEdges.insert(SyncEdge(postTransNodeId, dstNodeId));
+
+            VkPipelineStageFlags normSrcStageMask;
+            VkPipelineStageFlags normDstStageMask;
+
+            const VkPipelineStageFlags graphicsStages =
+                VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT |
+                VK_PIPELINE_STAGE_VERTEX_INPUT_BIT |
+                VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
+                VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT |
+                VK_PIPELINE_STAGE_TESSELLATION_EVALUATION_SHADER_BIT |
+                VK_PIPELINE_STAGE_GEOMETRY_SHADER_BIT |
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT |
+                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+
+            const VkPipelineStageFlags commandStages =
+                graphicsStages |
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+                VK_PIPELINE_STAGE_TRANSFER_BIT;
+
+            normSrcStageMask = pipelineBarrier->srcStageMask & (
+                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT |
+                VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT |
+                VK_PIPELINE_STAGE_HOST_BIT |
+                commandStages);
+
+            if (pipelineBarrier->srcStageMask & VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT)
+                normSrcStageMask |= graphicsStages;
+            if (pipelineBarrier->srcStageMask & VK_PIPELINE_STAGE_ALL_COMMANDS_BIT)
+                normSrcStageMask |= commandStages;
+
+            normDstStageMask = pipelineBarrier->dstStageMask & (
+                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT |
+                VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT |
+                VK_PIPELINE_STAGE_HOST_BIT |
+                commandStages);
+
+            if (pipelineBarrier->dstStageMask & VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT)
+                normDstStageMask |= graphicsStages;
+            if (pipelineBarrier->dstStageMask & VK_PIPELINE_STAGE_ALL_COMMANDS_BIT)
+                normDstStageMask |= commandStages;
+
+            {
+                SyncNode srcStageNode, dstStageNode;
+                srcStageNode.type = SyncNode::SYNC_CMD_SRC_STAGE;
+                dstStageNode.type = SyncNode::SYNC_CMD_DST_STAGE;
+                srcStageNode.commandId = dstStageNode.commandId = commandId;
+
+                for (VkPipelineStageFlagBits stage : {
+                    VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                    VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+                    VK_PIPELINE_STAGE_VERTEX_INPUT_BIT,
+                    VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+                    VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT,
+                    VK_PIPELINE_STAGE_TESSELLATION_EVALUATION_SHADER_BIT,
+                    VK_PIPELINE_STAGE_GEOMETRY_SHADER_BIT,
+                    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                    VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+                    VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                    VK_PIPELINE_STAGE_HOST_BIT,
+                })
+                {
+                    if (pipelineBarrier->srcStageMask & stage)
+                    {
+                        srcStageNode.stage = stage;
+
+                        uint64_t srcStageNodeId = addNode(srcStageNode);
+                        mEdges.insert(SyncEdge(srcStageNodeId, srcNodeId));
+
+                        mPrecedingEdges.insert(SyncEdgeSet(srcStageNodeId, commandId, stage));
+                    }
+
+                    if (pipelineBarrier->dstStageMask & stage)
+                    {
+                        dstStageNode.stage = stage;
+
+                        uint64_t dstStageNodeId = addNode(dstStageNode);
+                        mEdges.insert(SyncEdge(dstNodeId, dstStageNodeId));
+
+                        mPrecedingEdges.insert(SyncEdgeSet(dstStageNodeId, commandId, stage));
+                    }
+                }
+            }
+
+            for (auto &imgMemBarrier : pipelineBarrier->imageMemoryBarriers)
+            {
+                auto image = mSyncDevice.images.find(imgMemBarrier.image);
+                if (image == mSyncDevice.images.end())
+                {
+                    return LOG_ERROR(COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
+                        "vkCmdPipelineBarrier called with image memory barrier with unknown image");
+                }
+                if (!image->second.isSwapchain)
+                {
+                    auto memory = mSyncDevice.device_memories.find(image->second.memory);
+                    if (memory == mSyncDevice.device_memories.end())
+                    {
+                        return LOG_ERROR(COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
+                            "vkCmdPipelineBarrier called with image memory barrier with image with unknown memory");
+                    }
+                }
+
+                SyncNode srcMemNode, dstMemNode;
+
+                srcMemNode.type = SyncNode::MEM_FLUSH;
+                srcMemNode.commandId = commandId;
+                srcMemNode.memory.type = MemRegion::IMAGE;
+                srcMemNode.memory.image = imgMemBarrier.image;
+                srcMemNode.memory.imageSubresourceRange = imgMemBarrier.subresourceRange;
+                srcMemNode.accesses = imgMemBarrier.srcAccessMask;
+                // XXX: does this need a stage or not?
+
+                dstMemNode.type = SyncNode::MEM_INVALIDATE;
+                dstMemNode.commandId = commandId;
+                dstMemNode.memory.type = MemRegion::IMAGE;
+                dstMemNode.memory.image = imgMemBarrier.image;
+                dstMemNode.memory.imageSubresourceRange = imgMemBarrier.subresourceRange;
+                dstMemNode.accesses = imgMemBarrier.dstAccessMask;
+
+                uint64_t srcMemNodeId = addNode(srcMemNode);
+                mEdges.insert(SyncEdge(srcNodeId, srcMemNodeId));
+                mEdges.insert(SyncEdge(srcMemNodeId, preTransNodeId));
+
+                uint64_t dstMemNodeId = addNode(dstMemNode);
+                mEdges.insert(SyncEdge(postTransNodeId, dstMemNodeId));
+                mEdges.insert(SyncEdge(dstMemNodeId, dstNodeId));
+
+                if (imgMemBarrier.newLayout != imgMemBarrier.oldLayout)
+                {
+                    SyncNode transNode;
+                    transNode.type = SyncNode::MEM_WRITE;
+                    transNode.commandId = commandId;
+                    transNode.memory.type = MemRegion::IMAGE;
+                    transNode.memory.image = imgMemBarrier.image;
+                    transNode.memory.imageSubresourceRange = imgMemBarrier.subresourceRange;
+                    transNode.stage = VIRTUAL_PIPELINE_STAGE_TRANSITION_BIT;
+                    transNode.accesses = VIRTUAL_ACCESS_TRANSITION_BIT;
+
+                    uint64_t transNodeId = addNode(transNode);
+
+                    mEdges.insert(SyncEdge(preTransNodeId, transNodeId));
+                    mEdges.insert(SyncEdge(transNodeId, postTransNodeId));
+                }
+            }
+
+
+        }
+
         if (cmd->is_draw())
         {
-            CommandId commandId = nextCommandId;
-            nextCommandId.sequenceId++;
+            CommandId commandId = mNextCommandId;
+            mNextCommandId.sequenceId++;
 
             if (graphicsPipeline == VK_NULL_HANDLE)
             {
@@ -470,6 +602,10 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
                 n1.commandId = n2.commandId = n3.commandId = commandId;
                 n1.stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
                 n3.stage = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+
+                uint64_t id1 = addNode(n1);
+                uint64_t id3 = addNode(n3);
+
                 for (VkPipelineStageFlagBits stage : {
                     VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
                     VK_PIPELINE_STAGE_VERTEX_INPUT_BIT,
@@ -486,8 +622,10 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
                 })
                 {
                     n2.stage = stage;
-                    edges.insert(SyncEdge(n1, n2));
-                    edges.insert(SyncEdge(n2, n3));
+                    uint64_t id2 = addNode(n2);
+
+                    mEdges.insert(SyncEdge(id1, id2));
+                    mEdges.insert(SyncEdge(id2, id3));
                 }
             }
 
@@ -561,7 +699,7 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
                                     "Draw command called with image view with unknown image on set %u, binding %u", setIdx, bindingIdx);
                             }
                             auto memory = mSyncDevice.device_memories.find(image->second.memory);
-                            if (memory == mSyncDevice.device_memories.end())
+                            if (!image->second.isSwapchain && memory == mSyncDevice.device_memories.end())
                             {
                                 return LOG_ERROR(COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
                                     "Draw command called with image with unknown memory on set %u, binding %u", setIdx, bindingIdx);
@@ -574,19 +712,26 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
 
                             str << " memory=" << (void *)image->second.memory;
                             str << " {";
-                            str << " uid=" << memory->second.uid;
-                            str << " allocationSize=" << memory->second.allocationSize;
-                            str << " memoryTypeIndex=" << memory->second.memoryTypeIndex;
-                            if (memory->second.isMapped)
+                            if (image->second.isSwapchain)
                             {
-                                str << " mapOffset=" << memory->second.mapOffset;
-                                str << " mapSize=" << memory->second.mapSize;
-                                str << " mapFlags=" << memory->second.mapFlags;
-                                str << " pMapData=" << memory->second.pMapData;
+                                str << " swapchain";
                             }
                             else
                             {
-                                str << " unmapped";
+                                str << " uid=" << memory->second.uid;
+                                str << " allocationSize=" << memory->second.allocationSize;
+                                str << " memoryTypeIndex=" << memory->second.memoryTypeIndex;
+                                if (memory->second.isMapped)
+                                {
+                                    str << " mapOffset=" << memory->second.mapOffset;
+                                    str << " mapSize=" << memory->second.mapSize;
+                                    str << " mapFlags=" << memory->second.mapFlags;
+                                    str << " pMapData=" << memory->second.pMapData;
+                                }
+                                else
+                                {
+                                    str << " unmapped";
+                                }
                             }
                             str << " }";
 
@@ -616,18 +761,21 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
                                 // XXX: handle the access types
 
                                 node.type = SyncNode::MEM_READ;
-                                node.access = VK_ACCESS_SHADER_READ_BIT;
-                                memNodes.insert(node);
-                                edges.insert(SyncEdge(stageNode, node));
-                                edges.insert(SyncEdge(node, stageNode));
+                                node.accesses = VK_ACCESS_SHADER_READ_BIT;
+
+                                uint64_t stageNodeId = addNode(stageNode);
+                                uint64_t nodeId = addNode(node);
+
+                                mEdges.insert(SyncEdge(stageNodeId, nodeId));
+                                mEdges.insert(SyncEdge(nodeId, stageNodeId));
 
                                 if (binding.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
                                 {
                                     node.type = SyncNode::MEM_WRITE;
-                                    node.access = VK_ACCESS_SHADER_WRITE_BIT;
-                                    memNodes.insert(node);
-                                    edges.insert(SyncEdge(stageNode, node));
-                                    edges.insert(SyncEdge(node, stageNode));
+                                    node.accesses = VK_ACCESS_SHADER_WRITE_BIT;
+                                    nodeId = addNode(node);
+                                    mEdges.insert(SyncEdge(stageNodeId, nodeId));
+                                    mEdges.insert(SyncEdge(nodeId, stageNodeId));
                                 }
                             }
 
@@ -690,22 +838,33 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
                             node.memory.bufferOffset = bufferView->second.offset;
                             node.memory.bufferRange = bufferView->second.range;
 
+                            SyncNode stageNode;
+                            stageNode.commandId = commandId;
+                            stageNode.type = SyncNode::ACTION_CMD_STAGE;
+
                             for (auto stage : pipelineStages)
                             {
-                                node.stage = stage;
+                                node.stage = stageNode.stage = stage;
 
                                 // XXX: handle the access types properly
                                 // (TODO: is UNIFORM_TEXEL_BUFFER using ACCESS_UNIFORM_READ?)
 
                                 node.type = SyncNode::MEM_READ;
-                                node.access = VK_ACCESS_SHADER_READ_BIT;
-                                memNodes.insert(node);
+                                node.accesses = VK_ACCESS_SHADER_READ_BIT;
+
+                                uint64_t stageNodeId = addNode(stageNode);
+                                uint64_t nodeId = addNode(node);
+
+                                mEdges.insert(SyncEdge(stageNodeId, nodeId));
+                                mEdges.insert(SyncEdge(nodeId, stageNodeId));
 
                                 if (binding.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER)
                                 {
                                     node.type = SyncNode::MEM_WRITE;
-                                    node.access = VK_ACCESS_SHADER_WRITE_BIT;
-                                    memNodes.insert(node);
+                                    node.accesses = VK_ACCESS_SHADER_WRITE_BIT;
+                                    nodeId = addNode(node);
+                                    mEdges.insert(SyncEdge(stageNodeId, nodeId));
+                                    mEdges.insert(SyncEdge(nodeId, stageNodeId));
                                 }
                             }
 
@@ -765,21 +924,32 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
 
                             // XXX: handle pDynamicOffsets
 
+                            SyncNode stageNode;
+                            stageNode.commandId = commandId;
+                            stageNode.type = SyncNode::ACTION_CMD_STAGE;
+
                             for (auto stage : pipelineStages)
                             {
-                                node.stage = stage;
+                                node.stage = stageNode.stage = stage;
 
                                 // XXX: handle the access types properly
 
                                 node.type = SyncNode::MEM_READ;
-                                node.access = VK_ACCESS_SHADER_READ_BIT;
-                                memNodes.insert(node);
+                                node.accesses = VK_ACCESS_SHADER_READ_BIT;
+
+                                uint64_t stageNodeId = addNode(stageNode);
+                                uint64_t nodeId = addNode(node);
+
+                                mEdges.insert(SyncEdge(stageNodeId, nodeId));
+                                mEdges.insert(SyncEdge(nodeId, stageNodeId));
 
                                 if (binding.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER || binding.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC)
                                 {
                                     node.type = SyncNode::MEM_WRITE;
-                                    node.access = VK_ACCESS_SHADER_WRITE_BIT;
-                                    memNodes.insert(node);
+                                    node.accesses = VK_ACCESS_SHADER_WRITE_BIT;
+                                    nodeId = addNode(node);
+                                    mEdges.insert(SyncEdge(stageNodeId, nodeId));
+                                    mEdges.insert(SyncEdge(nodeId, stageNodeId));
                                 }
                             }
 
@@ -803,24 +973,36 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
         }
     }
 
-    for (const SyncNode &node : memNodes)
+    for (auto &it : mNodesById)
     {
         std::stringstream str;
-        node.to_string(str);
-        if (LOG_INFO(QUEUE, queue, SYNC_MSG_NONE, "Mem node: %s", str.str().c_str()))
+        it.second.to_string(str);
+        if (LOG_INFO(QUEUE, queue, SYNC_MSG_NONE, "Mem node: %"PRIu64" %s", it.first, str.str().c_str()))
             return true;
     }
 
-    for (const SyncEdge &edge : edges)
+    for (const SyncEdge &edge : mEdges)
     {
         std::stringstream str;
-        str << "    src: ";
-        edge.a.to_string(str);
-        str << "\n    dst: ";
-        edge.b.to_string(str);
+        str << "    src: " << edge.a << " ";
+        mNodesById[edge.a].to_string(str);
+        str << "\n    dst: " << edge.b << " ";
+        mNodesById[edge.b].to_string(str);
         if (LOG_INFO(QUEUE, queue, SYNC_MSG_NONE, "Edge:\n%s", str.str().c_str()))
             return true;
     }
 
     return false;
+}
+
+uint64_t SyncValidator::addNode(const SyncNode &node)
+{
+    auto it = mNodeIds.find(node);
+    if (it != mNodeIds.end())
+        return it->second;
+
+    uint64_t id = mNextNodeId++;
+    mNodesById[id] = node;
+    mNodeIds[node] = id;
+    return id;
 }

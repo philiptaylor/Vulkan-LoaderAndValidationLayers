@@ -731,6 +731,12 @@ LAYER_FN(VkResult) vkBindImageMemory(
                     "vkBindImageMemory called with unknown image"))
                 return VK_ERROR_VALIDATION_FAILED_EXT;
         }
+        else if (it->second.isSwapchain)
+        {
+            if (LOG_ERROR(device_data, IMAGE, image, SYNC_MSG_INVALID_PARAM,
+                    "vkBindImageMemory called with swapchain image"))
+                return VK_ERROR_VALIDATION_FAILED_EXT;
+        }
         else
         {
             it->second.memory = memory;
@@ -952,6 +958,7 @@ LAYER_FN(VkResult) vkCreateImage(
 
         sync_image image;
         image.image = *pImage;
+        image.isSwapchain = false;
         image.flags = pCreateInfo->flags;
         image.imageType = pCreateInfo->imageType;
         image.format = pCreateInfo->format;
@@ -967,6 +974,9 @@ LAYER_FN(VkResult) vkCreateImage(
             pCreateInfo->pQueueFamilyIndices + pCreateInfo->queueFamilyIndexCount
         );
         image.initialLayout = pCreateInfo->initialLayout;
+
+        image.memory = VK_NULL_HANDLE;
+        image.memoryOffset = 0;
 
         device_data->dispatch.GetImageMemoryRequirements(device, *pImage, &image.memoryRequirements);
 
@@ -1036,6 +1046,12 @@ LAYER_FN(void) vkDestroyImage(
         {
             if (LOG_ERROR(device_data, IMAGE, image, SYNC_MSG_INVALID_PARAM,
                     "vkDestroyImage called with unknown image"))
+                return;
+        }
+        else if (it->second.isSwapchain)
+        {
+            if (LOG_ERROR(device_data, IMAGE, image, SYNC_MSG_INVALID_PARAM,
+                    "vkDestroyImage called with swapchain image"))
                 return;
         }
         else
@@ -2375,9 +2391,156 @@ LAYER_FN(void) vkCmdEndRenderPass(
 
 // LAYER_FN(void) vkCmdExecuteCommands(VkCommandBuffer commandBuffer, uint32_t commandBufferCount, const VkCommandBuffer* pCommandBuffers);
 
-// LAYER_FN(VkResult) vkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreateInfoKHR* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkSwapchainKHR* pSwapchain);
-// LAYER_FN(void) vkDestroySwapchainKHR(VkDevice device, VkSwapchainKHR swapchain, const VkAllocationCallbacks* pAllocator);
-// LAYER_FN(VkResult) vkGetSwapchainImagesKHR(VkDevice device, VkSwapchainKHR swapchain, uint32_t* pSwapchainImageCount, VkImage* pSwapchainImages);
+LAYER_FN(VkResult) vkCreateSwapchainKHR(
+    VkDevice device,
+    const VkSwapchainCreateInfoKHR *pCreateInfo,
+    const VkAllocationCallbacks *pAllocator,
+    VkSwapchainKHR *pSwapchain)
+{
+    auto device_data = get_layer_device_data(device);
+
+    if (LOG_DEBUG(device_data, DEVICE, device, SYNC_MSG_NONE, __FUNCTION__))
+        return VK_ERROR_VALIDATION_FAILED_EXT;
+
+    VkResult result = device_data->dispatch.CreateSwapchainKHR(device, pCreateInfo, pAllocator, pSwapchain);
+    if (result != VK_SUCCESS)
+        return result;
+
+    uint32_t swapchainImageCount = 0;
+    result = device_data->dispatch.GetSwapchainImagesKHR(device, *pSwapchain, &swapchainImageCount, nullptr);
+    if (result != VK_SUCCESS)
+        return result;
+
+    std::vector<VkImage> images(swapchainImageCount);
+    if (swapchainImageCount > 0)
+    {
+        result = device_data->dispatch.GetSwapchainImagesKHR(device, *pSwapchain, &swapchainImageCount, images.data());
+        if (result != VK_SUCCESS)
+            return result;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(device_data->sync_mutex);
+
+        sync_swapchain swapchain;
+        swapchain.swapchain = *pSwapchain;
+        swapchain.images = images;
+
+        bool inserted = device_data->sync.swapchains.insert(std::make_pair(
+            *pSwapchain,
+            swapchain
+        )).second;
+
+        if (!inserted)
+        {
+            if (LOG_ERROR(device_data, SWAPCHAIN_KHR, *pSwapchain, SYNC_MSG_INTERNAL_ERROR,
+                    "Internal error in vkCreateSwapchainKHR: new swapchain already exists"))
+                return VK_ERROR_VALIDATION_FAILED_EXT;
+        }
+
+        sync_image image;
+        image.isSwapchain = true;
+        image.flags = 0;
+        image.imageType = VK_IMAGE_TYPE_2D;
+        image.format = pCreateInfo->imageFormat;
+        image.extent.width = pCreateInfo->imageExtent.width;
+        image.extent.height = pCreateInfo->imageExtent.height;
+        image.extent.depth = 1;
+        image.mipLevels = 1;
+        image.arrayLayers = pCreateInfo->imageArrayLayers;
+        image.samples = VK_SAMPLE_COUNT_1_BIT;
+        image.tiling = VK_IMAGE_TILING_OPTIMAL;
+        image.usage = pCreateInfo->imageUsage;
+        image.sharingMode = pCreateInfo->imageSharingMode;
+        image.queueFamilyIndices = std::vector<uint32_t>(
+            pCreateInfo->pQueueFamilyIndices,
+            pCreateInfo->pQueueFamilyIndices + pCreateInfo->queueFamilyIndexCount
+        );
+        image.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+        image.memory = VK_NULL_HANDLE;
+        image.memoryOffset = 0;
+
+        for (VkImage imageObj : swapchain.images)
+        {
+            image.image = imageObj;
+
+            device_data->dispatch.GetImageMemoryRequirements(device, imageObj, &image.memoryRequirements);
+
+            inserted = device_data->sync.images.insert(std::make_pair(
+                imageObj,
+                image
+            )).second;
+
+            if (!inserted)
+            {
+                if (LOG_ERROR(device_data, IMAGE, imageObj, SYNC_MSG_INTERNAL_ERROR,
+                        "Internal error in vkCreateSwapchainKHR: new image already exists"))
+                    return VK_ERROR_VALIDATION_FAILED_EXT;
+            }
+        }
+    }
+
+    return result;
+}
+
+LAYER_FN(void) vkDestroySwapchainKHR(
+    VkDevice device,
+    VkSwapchainKHR swapchain,
+    const VkAllocationCallbacks *pAllocator)
+{
+    auto device_data = get_layer_device_data(device);
+
+    if (LOG_DEBUG(device_data, SWAPCHAIN_KHR, swapchain, SYNC_MSG_NONE, __FUNCTION__))
+        return;
+
+    {
+        std::lock_guard<std::mutex> lock(device_data->sync_mutex);
+
+        auto it = device_data->sync.swapchains.find(swapchain);
+        if (it == device_data->sync.swapchains.end())
+        {
+            if (LOG_ERROR(device_data, SWAPCHAIN_KHR, swapchain, SYNC_MSG_INVALID_PARAM,
+                    "vkDestroySwapchainKHR called with unknown swapchain"))
+                return;
+        }
+        else
+        {
+            for (VkImage image : it->second.images)
+            {
+                auto it2 = device_data->sync.images.find(image);
+                if (it2 == device_data->sync.images.end())
+                {
+                    if (LOG_ERROR(device_data, IMAGE, image, SYNC_MSG_INVALID_PARAM,
+                            "Internal error in vkDestroySwapchainKHR: unknown image"))
+                        return;
+                }
+                else
+                {
+                    device_data->sync.images.erase(it2);
+                }
+            }
+
+            device_data->sync.swapchains.erase(it);
+        }
+    }
+
+    device_data->dispatch.DestroySwapchainKHR(device, swapchain, pAllocator);
+}
+
+LAYER_FN(VkResult) vkGetSwapchainImagesKHR(
+    VkDevice device,
+    VkSwapchainKHR swapchain,
+    uint32_t *pSwapchainImageCount,
+    VkImage *pSwapchainImages)
+{
+    auto device_data = get_layer_device_data(device);
+
+    if (LOG_DEBUG(device_data, SWAPCHAIN_KHR, swapchain, SYNC_MSG_NONE, __FUNCTION__))
+        return VK_ERROR_VALIDATION_FAILED_EXT;
+
+    return device_data->dispatch.GetSwapchainImagesKHR(device, swapchain, pSwapchainImageCount, pSwapchainImages);
+}
 
 LAYER_FN(VkResult) vkAcquireNextImageKHR(
     VkDevice device,
@@ -2549,9 +2712,9 @@ LAYER_FN(PFN_vkVoidFunction) vkGetDeviceProcAddr(VkDevice device, const char *fu
     X(vkCmdEndRenderPass);
 // X(vkCmdExecuteCommands);
 
-// X(vkCreateSwapchainKHR);
-// X(vkDestroySwapchainKHR);
-// X(vkGetSwapchainImagesKHR);
+    X(vkCreateSwapchainKHR);
+    X(vkDestroySwapchainKHR);
+    X(vkGetSwapchainImagesKHR);
     X(vkAcquireNextImageKHR);
     X(vkQueuePresentKHR);
 
