@@ -20,8 +20,12 @@
  * USE OR OTHER DEALINGS IN THE MATERIALS
  */
 
+#define NOMINMAX
+
 #include "sync.h"
 
+#include <algorithm>
+#include <deque>
 #include <sstream>
 
 #define _LOG_GENERIC(level, objType, object, messageCode, fmt, ...) \
@@ -115,9 +119,22 @@ void MemRegion::to_string(std::ostream &str) const
         str << " " << (void *)buffer;
         str << " offset=" << bufferOffset;
         str << " range=" << bufferRange;
+        str << " deviceMemory=" << (void *)deviceMemory;
+        str << " deviceMemoryOffset=" << deviceMemoryOffset;
         break;
     case IMAGE:
         str << " IMAGE";
+        str << " " << (void *)image;
+        str << " aspectMask=0x" << std::hex << imageSubresourceRange.aspectMask << std::dec;
+        str << " baseMipLevel=" << imageSubresourceRange.baseMipLevel;
+        str << " levelCount=" << imageSubresourceRange.levelCount;
+        str << " baseArrayLayer=" << imageSubresourceRange.baseArrayLayer;
+        str << " layerCount=" << imageSubresourceRange.layerCount;
+        str << " deviceMemory=" << (void *)deviceMemory;
+        str << " deviceMemoryOffset=" << deviceMemoryOffset;
+        break;
+    case SWAPCHAIN_IMAGE:
+        str << " SWAPCHAIN_IMAGE";
         str << " " << (void *)image;
         str << " aspectMask=0x" << std::hex << imageSubresourceRange.aspectMask << std::dec;
         str << " baseMipLevel=" << imageSubresourceRange.baseMipLevel;
@@ -130,6 +147,78 @@ void MemRegion::to_string(std::ostream &str) const
     str << " }";
 }
 
+static bool findSubresourceRangeOverlap(const VkImageSubresourceRange &a, const VkImageSubresourceRange &b, VkImageSubresourceRange &overlap)
+{
+    if ((a.aspectMask & b.aspectMask) == 0)
+        return false;
+
+    overlap.aspectMask = a.aspectMask & b.aspectMask;
+
+    if (a.baseMipLevel + a.levelCount <= b.baseMipLevel)
+        return false;
+    if (b.baseMipLevel + b.levelCount <= a.baseMipLevel)
+        return false;
+
+    overlap.baseMipLevel = std::max(a.baseMipLevel, b.baseMipLevel);
+    overlap.levelCount = std::min(a.baseMipLevel + a.levelCount, b.baseMipLevel + b.levelCount) - overlap.baseMipLevel;
+
+    if (a.baseArrayLayer + a.layerCount <= b.baseArrayLayer)
+        return false;
+    if (b.baseArrayLayer + b.layerCount <= a.baseArrayLayer)
+        return false;
+
+    overlap.baseArrayLayer = std::max(a.baseArrayLayer, b.baseArrayLayer);
+    overlap.layerCount = std::min(a.baseArrayLayer + a.layerCount, b.baseArrayLayer + b.layerCount) - overlap.baseArrayLayer;
+
+    return true;
+}
+
+static bool findMemRegionOverlap(const MemRegion &a, const MemRegion &b, MemRegion &overlap)
+{
+    // Global overlaps with anything
+    if (a.type == MemRegion::GLOBAL)
+    {
+        overlap = b;
+        return true;
+    }
+    if (b.type == MemRegion::GLOBAL)
+    {
+        overlap = a;
+        return true;
+    }
+
+    // Swapchain images can't be aliased, so we just need to check identity
+    if (a.type == MemRegion::SWAPCHAIN_IMAGE && b.type == MemRegion::SWAPCHAIN_IMAGE)
+    {
+        overlap = a;
+        if (a.image == b.image && findSubresourceRangeOverlap(a.imageSubresourceRange, b.imageSubresourceRange, overlap.imageSubresourceRange))
+        {
+            return true;
+        }
+        else
+        {
+            return false;
+        }
+    }
+
+    if (a.type == MemRegion::IMAGE && b.type == MemRegion::IMAGE)
+    {
+        overlap = a;
+        if (a.image == b.image && findSubresourceRangeOverlap(a.imageSubresourceRange, b.imageSubresourceRange, overlap.imageSubresourceRange))
+        {
+            return true;
+        }
+        else
+        {
+            // XXX: handle IMAGE aliasing
+            return false;
+        }
+    }
+
+    // TODO: handle BUFFER
+
+    return false;
+}
 
 static const VkPipelineStageFlagBits VIRTUAL_PIPELINE_STAGE_TRANSITION_BIT = (VkPipelineStageFlagBits)0x10000000;
 static const VkAccessFlagBits VIRTUAL_ACCESS_TRANSITION_BIT = (VkAccessFlagBits)0x10000000;
@@ -481,7 +570,7 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
                         uint64_t dstStageNodeId = addNode(dstStageNode);
                         mEdges.insert(SyncEdge(dstNodeId, dstStageNodeId));
 
-                        mPrecedingEdges.insert(SyncEdgeSet(dstStageNodeId, commandId, stage));
+                        mFollowingEdges.insert(SyncEdgeSet(dstStageNodeId, commandId, stage));
                     }
                 }
             }
@@ -494,7 +583,38 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
                     return LOG_ERROR(COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
                         "vkCmdPipelineBarrier called with image memory barrier with unknown image");
                 }
-                if (!image->second.isSwapchain)
+
+                SyncNode srcMemNode;
+                srcMemNode.type = SyncNode::MEM_FLUSH;
+                srcMemNode.commandId = commandId;
+                srcMemNode.memory.image = imgMemBarrier.image;
+                srcMemNode.memory.imageSubresourceRange = imgMemBarrier.subresourceRange;
+                srcMemNode.stages = pipelineBarrier->srcStageMask;
+                srcMemNode.accesses = imgMemBarrier.srcAccessMask;
+
+                SyncNode dstMemNode;
+                dstMemNode.type = SyncNode::MEM_INVALIDATE;
+                dstMemNode.commandId = commandId;
+                dstMemNode.memory.image = imgMemBarrier.image;
+                dstMemNode.memory.imageSubresourceRange = imgMemBarrier.subresourceRange;
+                dstMemNode.stages = pipelineBarrier->dstStageMask;
+                dstMemNode.accesses = imgMemBarrier.dstAccessMask;
+
+                SyncNode transNode;
+                transNode.type = SyncNode::MEM_WRITE;
+                transNode.commandId = commandId;
+                transNode.memory.image = imgMemBarrier.image;
+                transNode.memory.imageSubresourceRange = imgMemBarrier.subresourceRange;
+                transNode.stages = VIRTUAL_PIPELINE_STAGE_TRANSITION_BIT;
+                transNode.accesses = VIRTUAL_ACCESS_TRANSITION_BIT;
+
+                if (image->second.isSwapchain)
+                {
+                    srcMemNode.memory.type = MemRegion::SWAPCHAIN_IMAGE;
+                    dstMemNode.memory.type = MemRegion::SWAPCHAIN_IMAGE;
+                    transNode.memory.type = MemRegion::SWAPCHAIN_IMAGE;
+                }
+                else
                 {
                     auto memory = mSyncDevice.device_memories.find(image->second.memory);
                     if (memory == mSyncDevice.device_memories.end())
@@ -502,25 +622,19 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
                         return LOG_ERROR(COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
                             "vkCmdPipelineBarrier called with image memory barrier with image with unknown memory");
                     }
+
+                    srcMemNode.memory.type = MemRegion::IMAGE;
+                    srcMemNode.memory.deviceMemory = memory->second.deviceMemory;
+                    srcMemNode.memory.deviceMemoryOffset = image->second.memoryOffset;
+
+                    dstMemNode.memory.type = MemRegion::IMAGE;
+                    dstMemNode.memory.deviceMemory = memory->second.deviceMemory;
+                    dstMemNode.memory.deviceMemoryOffset = image->second.memoryOffset;
+
+                    transNode.memory.type = MemRegion::IMAGE;
+                    transNode.memory.deviceMemory = memory->second.deviceMemory;
+                    transNode.memory.deviceMemoryOffset = image->second.memoryOffset;
                 }
-
-                SyncNode srcMemNode, dstMemNode;
-
-                srcMemNode.type = SyncNode::MEM_FLUSH;
-                srcMemNode.commandId = commandId;
-                srcMemNode.memory.type = MemRegion::IMAGE;
-                srcMemNode.memory.image = imgMemBarrier.image;
-                srcMemNode.memory.imageSubresourceRange = imgMemBarrier.subresourceRange;
-                srcMemNode.stages = pipelineBarrier->srcStageMask;
-                srcMemNode.accesses = imgMemBarrier.srcAccessMask;
-
-                dstMemNode.type = SyncNode::MEM_INVALIDATE;
-                dstMemNode.commandId = commandId;
-                dstMemNode.memory.type = MemRegion::IMAGE;
-                dstMemNode.memory.image = imgMemBarrier.image;
-                dstMemNode.memory.imageSubresourceRange = imgMemBarrier.subresourceRange;
-                dstMemNode.stages = pipelineBarrier->dstStageMask;
-                dstMemNode.accesses = imgMemBarrier.dstAccessMask;
 
                 if (srcMemNode.accesses != 0)
                 {
@@ -538,15 +652,6 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
 
                 if (imgMemBarrier.newLayout != imgMemBarrier.oldLayout)
                 {
-                    SyncNode transNode;
-                    transNode.type = SyncNode::MEM_WRITE;
-                    transNode.commandId = commandId;
-                    transNode.memory.type = MemRegion::IMAGE;
-                    transNode.memory.image = imgMemBarrier.image;
-                    transNode.memory.imageSubresourceRange = imgMemBarrier.subresourceRange;
-                    transNode.stages = VIRTUAL_PIPELINE_STAGE_TRANSITION_BIT;
-                    transNode.accesses = VIRTUAL_ACCESS_TRANSITION_BIT;
-
                     uint64_t transNodeId = addNode(transNode);
 
                     mEdges.insert(SyncEdge(preTransNodeId, transNodeId));
@@ -759,9 +864,18 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
 
                             SyncNode node;
                             node.commandId = commandId;
-                            node.memory.type = MemRegion::IMAGE;
                             node.memory.image = imageView->second.image;
                             node.memory.imageSubresourceRange = imageView->second.subresourceRange;
+                            if (image->second.isSwapchain)
+                            {
+                                node.memory.type = MemRegion::SWAPCHAIN_IMAGE;
+                            }
+                            else
+                            {
+                                node.memory.type = MemRegion::IMAGE;
+                                node.memory.deviceMemory = memory->second.deviceMemory;
+                                node.memory.deviceMemoryOffset = image->second.memoryOffset;
+                            }
 
                             SyncNode stageNode;
                             stageNode.commandId = commandId;
@@ -850,6 +964,8 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
                             node.memory.buffer = bufferView->second.buffer;
                             node.memory.bufferOffset = bufferView->second.offset;
                             node.memory.bufferRange = bufferView->second.range;
+                            node.memory.deviceMemory = memory->second.deviceMemory;
+                            node.memory.deviceMemoryOffset = buffer->second.memoryOffset;
 
                             SyncNode stageNode;
                             stageNode.commandId = commandId;
@@ -934,6 +1050,8 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
                             node.memory.buffer = bufferInfo.buffer;
                             node.memory.bufferOffset = bufferInfo.offset;
                             node.memory.bufferRange = bufferInfo.range;
+                            node.memory.deviceMemory = memory->second.deviceMemory;
+                            node.memory.deviceMemoryOffset = buffer->second.memoryOffset;
 
                             // XXX: handle pDynamicOffsets
 
@@ -1005,6 +1123,56 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
             return true;
     }
 
+    // Look for memory violations:
+    // * READ-after-WRITE, WRITE-after-WRITE to overlapping memory without execution dependency
+    // * READ-after-WRITE without a FLUSH and INVALIDATE in between
+    // ...
+    // (NOTE: in theory should apply to each byte(/line) of the accesses)
+
+    for (auto &it1 = mNodesById.begin(); it1 != mNodesById.end(); ++it1)
+    {
+        for (auto &it2 = mNodesById.begin(); it2 != mNodesById.end(); ++it2)
+        {
+            if (it1 == it2)
+                continue;
+
+            if (it1->second.type == SyncNode::MEM_WRITE && it2->second.type == SyncNode::MEM_READ)
+            {
+//                 std::stringstream str;
+//                 str << "Write-and-read between\n  node " << it1->first << " ";
+//                 it1->second.to_string(str);
+//                 str << ";\n  node " << it2->first << " ";
+//                 it2->second.to_string(str);
+//                 if (LOG_INFO(QUEUE, queue, SYNC_MSG_NONE, "%s", str.str().c_str()))
+//                     return true;
+
+                MemRegion overlap;
+                if (findMemRegionOverlap(it1->second.memory, it2->second.memory, overlap))
+                {
+                    std::stringstream str;
+                    str << "Overlap between\n  node " << it1->first << " ";
+                    it1->second.to_string(str);
+                    str << ";\n  node " << it2->first << " ";
+                    it2->second.to_string(str);
+                    str << ";\n  overlap at ";
+                    overlap.to_string(str);
+                    if (LOG_INFO(QUEUE, queue, SYNC_MSG_NONE, "%s", str.str().c_str()))
+                        return true;
+
+                    bool path1 = findPath(it1->first, it2->first);
+                    bool path2 = findPath(it2->first, it1->first);
+                    if (LOG_INFO(QUEUE, queue, SYNC_MSG_NONE, "path1=%d path2=%d", path1, path2))
+                        return true;
+                    if ((path1 && path2) || (!path1 && !path2))
+                    {
+                        if (LOG_ERROR(QUEUE, queue, SYNC_MSG_NONE, "Write and read have no order between them"))
+                            return true;
+                    }
+                }
+            }
+        }
+    }
+
     return false;
 }
 
@@ -1018,4 +1186,84 @@ uint64_t SyncValidator::addNode(const SyncNode &node)
     mNodesById[id] = node;
     mNodeIds[node] = id;
     return id;
+}
+
+bool SyncValidator::findPath(uint64_t srcNodeId, uint64_t dstNodeId)
+{
+    std::deque<uint64_t> openList;
+    std::set<uint64_t> closedSet;
+
+    openList.push_back(srcNodeId);
+
+    while (!openList.empty())
+    {
+        uint64_t curNodeId = openList.front();
+        openList.pop_front();
+
+        if (curNodeId == dstNodeId)
+            return true;
+
+        // Mark this node as closed, or if it was already closed then skip it
+        bool inserted = closedSet.insert(curNodeId).second;
+        if (!inserted)
+            continue;
+
+        SyncNode curNode = mNodesById[curNodeId];
+
+        // Find every node N such that nodeId <= N, add them to the open list
+
+        for (auto &edge : mEdges)
+        {
+            if (edge.a == curNodeId)
+            {
+                openList.push_back(edge.b);
+            }
+        }
+
+        if (curNode.type == SyncNode::ACTION_CMD_STAGE || curNode.type == SyncNode::SYNC_CMD_DST_STAGE)
+        {
+            for (auto &edgeSet : mPrecedingEdges)
+            {
+                if (edgeSet.commandBound.queueId == curNode.commandId.queueId &&
+                    (edgeSet.commandBound.subpassId == CommandId::SUBPASS_NONE ||
+                        edgeSet.commandBound.subpassId == curNode.commandId.subpassId) &&
+                    curNode.commandId.sequenceId < edgeSet.commandBound.sequenceId)
+                {
+                    SyncNode syncNode = mNodesById[edgeSet.sync];
+                    if ((curNode.stages & syncNode.stages) != 0)
+                    {
+                        openList.push_back(edgeSet.sync);
+                    }
+                }
+            }
+        }
+
+        if (curNode.type == SyncNode::SYNC_CMD_DST_STAGE)
+        {
+            for (auto &edgeSet : mFollowingEdges)
+            {
+                if (edgeSet.sync == curNodeId)
+                {
+                    for (auto &otherNode : mNodesById)
+                    {
+                        if (edgeSet.commandBound.queueId == otherNode.second.commandId.queueId &&
+                            (edgeSet.commandBound.subpassId == CommandId::SUBPASS_NONE ||
+                                edgeSet.commandBound.subpassId == otherNode.second.commandId.subpassId) &&
+                            edgeSet.commandBound.sequenceId < otherNode.second.commandId.sequenceId)
+                        {
+                            if (otherNode.second.type == SyncNode::ACTION_CMD_STAGE || otherNode.second.type == SyncNode::SYNC_CMD_SRC_STAGE)
+                            {
+                                if ((curNode.stages & otherNode.second.stages) != 0)
+                                {
+                                    openList.push_back(otherNode.first);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return false;
 }

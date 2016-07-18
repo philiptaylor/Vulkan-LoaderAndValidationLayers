@@ -750,6 +750,7 @@ struct MemRegion
         GLOBAL,
         BUFFER,
         IMAGE,
+        SWAPCHAIN_IMAGE,
     };
 
     EType type;
@@ -759,9 +760,13 @@ struct MemRegion
     VkDeviceSize bufferOffset;
     VkDeviceSize bufferRange;
 
-    // If IMAGE:
+    // If IMAGE or SWAPCHAIN_IMAGE:
     VkImage image;
     VkImageSubresourceRange imageSubresourceRange;
+
+    // If BUFFER or IMAGE:
+    VkDeviceMemory deviceMemory;
+    VkDeviceSize deviceMemoryOffset;
 
     MemRegion();
     bool operator<(const MemRegion &m) const;
@@ -849,6 +854,8 @@ private:
     std::set<SyncEdgeSet> mFollowingEdges;
 
     uint64_t addNode(const SyncNode &node);
+
+    bool findPath(uint64_t srcNodeId, uint64_t dstNodeId);
 };
 
 #endif // INCLUDED_VULKAN_SYNC_H
