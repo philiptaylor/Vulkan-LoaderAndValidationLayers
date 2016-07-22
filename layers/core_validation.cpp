@@ -4619,7 +4619,7 @@ static bool validateCommandBufferState(layer_data *dev_data, GLOBAL_CB_NODE *pCB
             // Inform app of reason CB invalid
             for (auto obj : pCB->broken_bindings) {
                 const char *type_str = object_type_to_string(obj.type);
-                // Descriptor sets are a special case that can be either destroyed or updated to invalidated a CB
+                // Descriptor sets are a special case that can be either destroyed or updated to invalidate a CB
                 const char *cause_str =
                     (obj.type == VK_DEBUG_REPORT_OBJECT_TYPE_DESCRIPTOR_SET_EXT) ? "destroyed or updated" : "destroyed";
 
