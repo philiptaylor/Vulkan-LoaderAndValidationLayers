@@ -6927,6 +6927,83 @@ TEST_F(VkLayerTest, InvalidCmdBufferPipelineDestroyed) {
     vkDestroyPipelineLayout(m_device->device(), pipeline_layout, NULL);
 }
 
+TEST_F(VkLayerTest, InvalidCmdBufferDescriptorSetDestroyed) {
+    TEST_DESCRIPTION("Attempt to draw with a command buffer that is invalid "
+                     "due to a descriptor set dependency being destroyed.");
+    ASSERT_NO_FATAL_FAILURE(InitState());
+    ASSERT_NO_FATAL_FAILURE(InitRenderTarget());
+
+    // Pool has to have at least 1 descriptor, even though set will be empty
+    VkDescriptorPoolSize ds_type_count{};
+    ds_type_count.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    ds_type_count.descriptorCount = 1;
+
+    VkDescriptorPoolCreateInfo ds_pool_ci{};
+    ds_pool_ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    ds_pool_ci.pNext = NULL;
+    ds_pool_ci.maxSets = 1;
+    ds_pool_ci.poolSizeCount = 1;
+    ds_pool_ci.pPoolSizes = &ds_type_count;
+
+    VkDescriptorPool ds_pool;
+    VkResult err =
+        vkCreateDescriptorPool(m_device->device(), &ds_pool_ci, NULL, &ds_pool);
+    ASSERT_VK_SUCCESS(err);
+
+    VkDescriptorSetLayoutCreateInfo ds_layout_ci{};
+    ds_layout_ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    ds_layout_ci.pNext = NULL;
+    ds_layout_ci.bindingCount = 0; // empty descriptor set
+
+    VkDescriptorSetLayout ds_layout;
+    err = vkCreateDescriptorSetLayout(m_device->device(), &ds_layout_ci, NULL,
+                                      &ds_layout);
+    ASSERT_VK_SUCCESS(err);
+
+    VkDescriptorSet desc_set;
+    VkDescriptorSetAllocateInfo ds_alloc_info{};
+    ds_alloc_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    ds_alloc_info.descriptorSetCount = 1;
+    ds_alloc_info.descriptorPool = ds_pool;
+    ds_alloc_info.pSetLayouts = &ds_layout;
+    err =
+        vkAllocateDescriptorSets(m_device->device(), &ds_alloc_info, &desc_set);
+    ASSERT_VK_SUCCESS(err);
+    // Since it's an empty set we don't have to update it
+    VkPipelineLayoutCreateInfo pipeline_layout_ci = {};
+    pipeline_layout_ci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pipeline_layout_ci.setLayoutCount = 1;
+    pipeline_layout_ci.pSetLayouts = &ds_layout;
+
+    VkPipelineLayout pipeline_layout;
+    err = vkCreatePipelineLayout(m_device->device(), &pipeline_layout_ci, NULL,
+                                 &pipeline_layout);
+    ASSERT_VK_SUCCESS(err);
+
+    m_commandBuffer->BeginCommandBuffer();
+    vkCmdBindDescriptorSets(m_commandBuffer->GetBufferHandle(),
+                            VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout, 0,
+                            1, &desc_set, 0, NULL);
+    m_commandBuffer->EndCommandBuffer();
+    // Now free descriptor set in order to cause error when submitting
+    vkFreeDescriptorSets(m_device->device(), ds_pool, 1, &desc_set);
+
+    m_errorMonitor->SetDesiredFailureMsg(
+        VK_DEBUG_REPORT_ERROR_BIT_EXT,
+        " that is invalid because bound descriptor set ");
+
+    VkSubmitInfo submit_info = {};
+    submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit_info.commandBufferCount = 1;
+    submit_info.pCommandBuffers = &m_commandBuffer->handle();
+    vkQueueSubmit(m_device->m_queue, 1, &submit_info, VK_NULL_HANDLE);
+
+    m_errorMonitor->VerifyFound();
+    vkDestroyPipelineLayout(m_device->device(), pipeline_layout, NULL);
+    vkDestroyDescriptorSetLayout(m_device->device(), ds_layout, NULL);
+    vkDestroyDescriptorPool(m_device->device(), ds_pool, NULL);
+}
+
 TEST_F(VkLayerTest, InvalidPipeline) {
     // Attempt to bind an invalid Pipeline to a valid Command Buffer
     // ObjectTracker should catch this.
