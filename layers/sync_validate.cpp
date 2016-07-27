@@ -580,52 +580,6 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
                 mPrecedingEdges.insert(SyncEdgeSet(srcStageNodeId, commandId, stage));
             }
 
-//             {
-//                 SyncNode srcStageNode, dstStageNode;
-//                 srcStageNode.type = SyncNode::SYNC_CMD_SRC_STAGE;
-//                 dstStageNode.type = SyncNode::SYNC_CMD_DST_STAGE;
-//                 srcStageNode.commandId = dstStageNode.commandId = commandId;
-// 
-//                 for (VkPipelineStageFlagBits stage : {
-//                     VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-//                     VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
-//                     VK_PIPELINE_STAGE_VERTEX_INPUT_BIT,
-//                     VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
-//                     VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT,
-//                     VK_PIPELINE_STAGE_TESSELLATION_EVALUATION_SHADER_BIT,
-//                     VK_PIPELINE_STAGE_GEOMETRY_SHADER_BIT,
-//                     VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-//                     VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
-//                     VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
-//                     VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-//                     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-//                     VK_PIPELINE_STAGE_TRANSFER_BIT,
-//                     VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-//                     VK_PIPELINE_STAGE_HOST_BIT,
-//                 })
-//                 {
-// //                     if (pipelineBarrier->srcStageMask & stage)
-// //                     {
-// //                         srcStageNode.stages = stage;
-// // 
-// //                         uint64_t srcStageNodeId = addNode(srcStageNode);
-// //                         mEdges.insert(SyncEdge(srcStageNodeId, srcNodeId));
-// // 
-// //                         mPrecedingEdges.insert(SyncEdgeSet(srcStageNodeId, commandId, stage));
-// //                     }
-// 
-// //                     if (pipelineBarrier->dstStageMask & stage)
-// //                     {
-// //                         dstStageNode.stages = stage;
-// // 
-// //                         uint64_t dstStageNodeId = addNode(dstStageNode);
-// //                         mEdges.insert(SyncEdge(dstNodeId, dstStageNodeId));
-// // 
-// //                         mFollowingEdges.insert(SyncEdgeSet(dstStageNodeId, commandId, stage));
-// //                     }
-//                 }
-//             }
-
             std::vector<SyncNode> flushNodes, transNodes, invalidateNodes;
 
             for (auto &imgMemBarrier : pipelineBarrier->imageMemoryBarriers)
@@ -742,7 +696,7 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
             std::vector<uint64_t> invalidateNodeIds;
             for (SyncNode &node : invalidateNodes)
                 invalidateNodeIds.push_back(addNode(node));
-            
+
             uint64_t dstNodeId = addNode(dstNode);
             mEdges.insert(SyncEdge(postTransNodeId, dstNodeId));
 
@@ -1187,46 +1141,6 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
                 for (uint64_t outNodeId : outNodeIds)
                     mEdges.insert(SyncEdge(outNodeId, bottomNodeId));
             }
-
-//             {
-//                 SyncNode topNode, n2, bottomNode;
-//                 topNode.type = SyncNode::ACTION_CMD_TOP_STAGE;
-//                 topNode.commandId = n2.commandId = bottomNode.commandId = commandId;
-//                 topNode.stages = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-//                 bottomNode.stages = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
-// 
-//                 uint64_t id1 = addNode(topNode);
-// 
-//                 std::vector<uint64_t> id2s;
-// 
-//                 for (VkPipelineStageFlagBits stage : {
-//                     VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
-//                         VK_PIPELINE_STAGE_VERTEX_INPUT_BIT,
-//                         VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
-//                         VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT,
-//                         VK_PIPELINE_STAGE_TESSELLATION_EVALUATION_SHADER_BIT,
-//                         VK_PIPELINE_STAGE_GEOMETRY_SHADER_BIT,
-//                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-//                         VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
-//                         VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
-//                         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-//                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-//                         VK_PIPELINE_STAGE_TRANSFER_BIT,
-//                 })
-//                 {
-//                     n2.stages = stage;
-//                     id2s.push_back(addNode(n2));
-//                 }
-// 
-//                     uint64_t id3 = addNode(bottomNode);
-// 
-//                     for (uint64_t id2 : id2s)
-//                     {
-//                         mEdges.insert(SyncEdge(id1, id2));
-//                         mEdges.insert(SyncEdge(id2, id3));
-//                     }
-//             }
-
 
             if (LOG_INFO(COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
                 "%s", str.str().c_str()))
