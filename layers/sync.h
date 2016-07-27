@@ -778,7 +778,8 @@ struct SyncNode
     enum ENodeType
     {
         INVALID,
-        ACTION_CMD_STAGE,
+        ACTION_CMD_STAGE_IN,
+        ACTION_CMD_STAGE_OUT,
         SYNC_CMD_SRC_STAGE,
         SYNC_CMD_DST_STAGE,
         SYNC_CMD_SRC,
@@ -810,7 +811,10 @@ struct SyncEdge
     uint64_t a;
     uint64_t b;
 
-    SyncEdge(uint64_t a, uint64_t b) : a(a), b(b) { }
+    SyncEdge(uint64_t a, uint64_t b) : a(a), b(b)
+    {
+        assert(a < b);
+    }
 
     bool operator<(const SyncEdge &e) const;
 };

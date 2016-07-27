@@ -245,7 +245,8 @@ void SyncNode::to_string(std::ostream &str) const
     switch (type)
     {
     case INVALID: str << "INVALID"; break;
-    case ACTION_CMD_STAGE: str << "ACTION_CMD_STAGE"; break;
+    case ACTION_CMD_STAGE_IN: str << "ACTION_CMD_STAGE_IN"; break;
+    case ACTION_CMD_STAGE_OUT: str << "ACTION_CMD_STAGE_OUT"; break;
     case SYNC_CMD_SRC_STAGE: str << "SYNC_CMD_SRC_STAGE"; break;
     case SYNC_CMD_DST_STAGE: str << "SYNC_CMD_DST_STAGE"; break;
     case SYNC_CMD_SRC: str << "SYNC_CMD_SRC"; break;
@@ -270,7 +271,8 @@ void SyncNode::to_string(std::ostream &str) const
 
     switch (type)
     {
-    case ACTION_CMD_STAGE:
+    case ACTION_CMD_STAGE_IN:
+    case ACTION_CMD_STAGE_OUT:
     case SYNC_CMD_SRC_STAGE:
     case SYNC_CMD_DST_STAGE:
     case MEM_READ:
@@ -381,6 +383,59 @@ bool SyncEdgeSet::operator<(const SyncEdgeSet &e) const
 
 #undef CMP
 
+template <typename T>
+struct EnumIterator
+{
+    // (10,0) (5,1) -> 1<<1
+    // (2,2) (1,3) -> 1<<3
+    // (0,4) (0,5) (0,32) -> end
+
+    struct It
+    {
+        T operator*() const
+        {
+            return static_cast<T>(1 << shift);
+        }
+
+        bool operator!=(const It &i) const
+        {
+            return !(value == i.value && shift == i.shift);
+        }
+
+        It &operator++()
+        {
+            ++shift;
+            value >>= 1;
+            while (shift < 32 && (value & 1) == 0)
+            {
+                ++shift;
+                value >>= 1;
+            }
+            return *this;
+        }
+
+        It(VkFlags value, int shift) : value(value), shift(shift)
+        {
+            while (shift < 32 && (value & 1) == 0)
+            {
+                ++shift;
+                value >>= 1;
+            }
+        }
+
+    private:
+        VkFlags value;
+        int shift;
+    };
+
+    VkFlags initial;
+    EnumIterator(VkFlags flags) : initial(flags) { }
+    It begin() { return It(initial, 0); }
+    It end() { return It(0, 32); }
+};
+
+// template <typename T>
+// EnumIterator<T> MakeEnumIterator(T v) { return EnumIterator<T>(v); }
 
 SyncValidator::SyncValidator(sync_device &syncDevice, debug_report_data *reportData)
     : mSyncDevice(syncDevice), mReportData(reportData)
@@ -469,24 +524,6 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
             CommandId commandId = mNextCommandId;
             mNextCommandId.sequenceId++;
 
-            SyncNode srcNode, preTransNode, postTransNode, dstNode;
-
-            srcNode.type = SyncNode::SYNC_CMD_SRC;
-            preTransNode.type = SyncNode::SYNC_CMD_PRE_TRANS;
-            postTransNode.type = SyncNode::SYNC_CMD_POST_TRANS;
-            dstNode.type = SyncNode::SYNC_CMD_DST;
-
-            srcNode.commandId = preTransNode.commandId = postTransNode.commandId = dstNode.commandId = commandId;
-
-            uint64_t srcNodeId = addNode(srcNode);
-            uint64_t preTransNodeId = addNode(preTransNode);
-            uint64_t postTransNodeId = addNode(postTransNode);
-            uint64_t dstNodeId = addNode(dstNode);
-
-            mEdges.insert(SyncEdge(srcNodeId, preTransNodeId));
-            mEdges.insert(SyncEdge(preTransNodeId, postTransNodeId));
-            mEdges.insert(SyncEdge(postTransNodeId, dstNodeId));
-
             VkPipelineStageFlags normSrcStageMask;
             VkPipelineStageFlags normDstStageMask;
 
@@ -529,51 +566,67 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
             if (pipelineBarrier->dstStageMask & VK_PIPELINE_STAGE_ALL_COMMANDS_BIT)
                 normDstStageMask |= commandStages;
 
+            std::vector<uint64_t> srcStageNodeIds;
+            for (auto stage : EnumIterator<VkPipelineStageFlagBits>(normSrcStageMask))
             {
-                SyncNode srcStageNode, dstStageNode;
+                SyncNode srcStageNode;
                 srcStageNode.type = SyncNode::SYNC_CMD_SRC_STAGE;
-                dstStageNode.type = SyncNode::SYNC_CMD_DST_STAGE;
-                srcStageNode.commandId = dstStageNode.commandId = commandId;
+                srcStageNode.commandId = commandId;
+                srcStageNode.stages = stage;
 
-                for (VkPipelineStageFlagBits stage : {
-                    VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                    VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
-                    VK_PIPELINE_STAGE_VERTEX_INPUT_BIT,
-                    VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
-                    VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT,
-                    VK_PIPELINE_STAGE_TESSELLATION_EVALUATION_SHADER_BIT,
-                    VK_PIPELINE_STAGE_GEOMETRY_SHADER_BIT,
-                    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                    VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
-                    VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
-                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                    VK_PIPELINE_STAGE_TRANSFER_BIT,
-                    VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-                    VK_PIPELINE_STAGE_HOST_BIT,
-                })
-                {
-                    if (pipelineBarrier->srcStageMask & stage)
-                    {
-                        srcStageNode.stages = stage;
+                uint64_t srcStageNodeId = addNode(srcStageNode);
+                srcStageNodeIds.push_back(srcStageNodeId);
 
-                        uint64_t srcStageNodeId = addNode(srcStageNode);
-                        mEdges.insert(SyncEdge(srcStageNodeId, srcNodeId));
-
-                        mPrecedingEdges.insert(SyncEdgeSet(srcStageNodeId, commandId, stage));
-                    }
-
-                    if (pipelineBarrier->dstStageMask & stage)
-                    {
-                        dstStageNode.stages = stage;
-
-                        uint64_t dstStageNodeId = addNode(dstStageNode);
-                        mEdges.insert(SyncEdge(dstNodeId, dstStageNodeId));
-
-                        mFollowingEdges.insert(SyncEdgeSet(dstStageNodeId, commandId, stage));
-                    }
-                }
+                mPrecedingEdges.insert(SyncEdgeSet(srcStageNodeId, commandId, stage));
             }
+
+//             {
+//                 SyncNode srcStageNode, dstStageNode;
+//                 srcStageNode.type = SyncNode::SYNC_CMD_SRC_STAGE;
+//                 dstStageNode.type = SyncNode::SYNC_CMD_DST_STAGE;
+//                 srcStageNode.commandId = dstStageNode.commandId = commandId;
+// 
+//                 for (VkPipelineStageFlagBits stage : {
+//                     VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+//                     VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+//                     VK_PIPELINE_STAGE_VERTEX_INPUT_BIT,
+//                     VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+//                     VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT,
+//                     VK_PIPELINE_STAGE_TESSELLATION_EVALUATION_SHADER_BIT,
+//                     VK_PIPELINE_STAGE_GEOMETRY_SHADER_BIT,
+//                     VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+//                     VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+//                     VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+//                     VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+//                     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+//                     VK_PIPELINE_STAGE_TRANSFER_BIT,
+//                     VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+//                     VK_PIPELINE_STAGE_HOST_BIT,
+//                 })
+//                 {
+// //                     if (pipelineBarrier->srcStageMask & stage)
+// //                     {
+// //                         srcStageNode.stages = stage;
+// // 
+// //                         uint64_t srcStageNodeId = addNode(srcStageNode);
+// //                         mEdges.insert(SyncEdge(srcStageNodeId, srcNodeId));
+// // 
+// //                         mPrecedingEdges.insert(SyncEdgeSet(srcStageNodeId, commandId, stage));
+// //                     }
+// 
+// //                     if (pipelineBarrier->dstStageMask & stage)
+// //                     {
+// //                         dstStageNode.stages = stage;
+// // 
+// //                         uint64_t dstStageNodeId = addNode(dstStageNode);
+// //                         mEdges.insert(SyncEdge(dstNodeId, dstStageNodeId));
+// // 
+// //                         mFollowingEdges.insert(SyncEdgeSet(dstStageNodeId, commandId, stage));
+// //                     }
+//                 }
+//             }
+
+            std::vector<SyncNode> flushNodes, transNodes, invalidateNodes;
 
             for (auto &imgMemBarrier : pipelineBarrier->imageMemoryBarriers)
             {
@@ -637,29 +690,81 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
                 }
 
                 if (srcMemNode.accesses != 0)
-                {
-                    uint64_t srcMemNodeId = addNode(srcMemNode);
-                    mEdges.insert(SyncEdge(srcNodeId, srcMemNodeId));
-                    mEdges.insert(SyncEdge(srcMemNodeId, preTransNodeId));
-                }
+                    flushNodes.push_back(srcMemNode);
 
                 if (dstMemNode.accesses != 0)
-                {
-                    uint64_t dstMemNodeId = addNode(dstMemNode);
-                    mEdges.insert(SyncEdge(postTransNodeId, dstMemNodeId));
-                    mEdges.insert(SyncEdge(dstMemNodeId, dstNodeId));
-                }
+                    invalidateNodes.push_back(dstMemNode);
 
                 if (imgMemBarrier.newLayout != imgMemBarrier.oldLayout)
-                {
-                    uint64_t transNodeId = addNode(transNode);
-
-                    mEdges.insert(SyncEdge(preTransNodeId, transNodeId));
-                    mEdges.insert(SyncEdge(transNodeId, postTransNodeId));
-                }
+                    transNodes.push_back(transNode);
             }
 
+            SyncNode srcNode, preTransNode, postTransNode, dstNode;
 
+            srcNode.type = SyncNode::SYNC_CMD_SRC;
+            preTransNode.type = SyncNode::SYNC_CMD_PRE_TRANS;
+            postTransNode.type = SyncNode::SYNC_CMD_POST_TRANS;
+            dstNode.type = SyncNode::SYNC_CMD_DST;
+
+            srcNode.commandId = preTransNode.commandId = postTransNode.commandId = dstNode.commandId = commandId;
+
+            uint64_t srcNodeId = addNode(srcNode);
+
+            for (auto srcStageNodeId : srcStageNodeIds)
+                mEdges.insert(SyncEdge(srcStageNodeId, srcNodeId));
+
+            std::vector<uint64_t> flushNodeIds;
+            for (SyncNode &node : flushNodes)
+                flushNodeIds.push_back(addNode(node));
+
+            uint64_t preTransNodeId = addNode(preTransNode);
+            mEdges.insert(SyncEdge(srcNodeId, preTransNodeId));
+
+            for (uint64_t flushNodeId : flushNodeIds)
+            {
+                mEdges.insert(SyncEdge(srcNodeId, flushNodeId));
+                mEdges.insert(SyncEdge(flushNodeId, preTransNodeId));
+            }
+
+            std::vector<uint64_t> transNodeIds;
+            for (SyncNode &node : transNodes)
+                transNodeIds.push_back(addNode(node));
+
+            uint64_t postTransNodeId = addNode(postTransNode);
+            mEdges.insert(SyncEdge(preTransNodeId, postTransNodeId));
+
+            for (uint64_t transNodeId : transNodeIds)
+            {
+                mEdges.insert(SyncEdge(preTransNodeId, transNodeId));
+                mEdges.insert(SyncEdge(transNodeId, postTransNodeId));
+            }
+
+            std::vector<uint64_t> invalidateNodeIds;
+            for (SyncNode &node : invalidateNodes)
+                invalidateNodeIds.push_back(addNode(node));
+            
+            uint64_t dstNodeId = addNode(dstNode);
+            mEdges.insert(SyncEdge(postTransNodeId, dstNodeId));
+
+            for (uint64_t invalidateNodeId : invalidateNodeIds)
+            {
+                mEdges.insert(SyncEdge(postTransNodeId, invalidateNodeId));
+                mEdges.insert(SyncEdge(invalidateNodeId, dstNodeId));
+            }
+
+            for (auto stage : EnumIterator<VkPipelineStageFlagBits>(normDstStageMask))
+            {
+                SyncNode dstStageNode;
+                dstStageNode.type = SyncNode::SYNC_CMD_DST_STAGE;
+                dstStageNode.commandId = commandId;
+                dstStageNode.stages = stage;
+
+                uint64_t dstStageNodeId = addNode(dstStageNode);
+
+                mEdges.insert(SyncEdge(dstNodeId, dstStageNodeId));
+
+                mFollowingEdges.insert(SyncEdgeSet(dstStageNodeId, commandId, stage));
+            }
         }
 
         if (cmd->is_draw())
@@ -714,39 +819,8 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
                 str << "\n";
             }
 
-            {
-                SyncNode n1, n2, n3;
-                n1.type = n2.type = n3.type = SyncNode::ACTION_CMD_STAGE;
-                n1.commandId = n2.commandId = n3.commandId = commandId;
-                n1.stages = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-                n3.stages = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
 
-                uint64_t id1 = addNode(n1);
-                uint64_t id3 = addNode(n3);
-
-                for (VkPipelineStageFlagBits stage : {
-                    VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
-                    VK_PIPELINE_STAGE_VERTEX_INPUT_BIT,
-                    VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
-                    VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT,
-                    VK_PIPELINE_STAGE_TESSELLATION_EVALUATION_SHADER_BIT,
-                    VK_PIPELINE_STAGE_GEOMETRY_SHADER_BIT,
-                    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                    VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
-                    VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
-                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                    VK_PIPELINE_STAGE_TRANSFER_BIT,
-                })
-                {
-                    n2.stages = stage;
-                    uint64_t id2 = addNode(n2);
-
-                    mEdges.insert(SyncEdge(id1, id2));
-                    mEdges.insert(SyncEdge(id2, id3));
-                }
-            }
-
+            std::map<VkPipelineStageFlagBits, std::vector<SyncNode>> memNodes;
 
             str << "\n    Accessible memory:\n";
             uint32_t setIdx = 0;
@@ -877,32 +951,20 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
                                 node.memory.deviceMemoryOffset = image->second.memoryOffset;
                             }
 
-                            SyncNode stageNode;
-                            stageNode.commandId = commandId;
-                            stageNode.type = SyncNode::ACTION_CMD_STAGE;
-
                             for (auto stage : pipelineStages)
                             {
-                                node.stages = stageNode.stages = stage;
+                                node.stages = stage;
 
                                 // XXX: handle the access types
 
                                 node.type = SyncNode::MEM_READ;
                                 node.accesses = VK_ACCESS_SHADER_READ_BIT;
 
-                                uint64_t stageNodeId = addNode(stageNode);
-                                uint64_t nodeId = addNode(node);
-
-                                mEdges.insert(SyncEdge(stageNodeId, nodeId));
-                                mEdges.insert(SyncEdge(nodeId, stageNodeId));
-
                                 if (binding.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
                                 {
                                     node.type = SyncNode::MEM_WRITE;
                                     node.accesses = VK_ACCESS_SHADER_WRITE_BIT;
-                                    nodeId = addNode(node);
-                                    mEdges.insert(SyncEdge(stageNodeId, nodeId));
-                                    mEdges.insert(SyncEdge(nodeId, stageNodeId));
+                                    memNodes[stage].push_back(node);
                                 }
                             }
 
@@ -967,13 +1029,9 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
                             node.memory.deviceMemory = memory->second.deviceMemory;
                             node.memory.deviceMemoryOffset = buffer->second.memoryOffset;
 
-                            SyncNode stageNode;
-                            stageNode.commandId = commandId;
-                            stageNode.type = SyncNode::ACTION_CMD_STAGE;
-
                             for (auto stage : pipelineStages)
                             {
-                                node.stages = stageNode.stages = stage;
+                                node.stages = stage;
 
                                 // XXX: handle the access types properly
                                 // (TODO: is UNIFORM_TEXEL_BUFFER using ACCESS_UNIFORM_READ?)
@@ -981,19 +1039,11 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
                                 node.type = SyncNode::MEM_READ;
                                 node.accesses = VK_ACCESS_SHADER_READ_BIT;
 
-                                uint64_t stageNodeId = addNode(stageNode);
-                                uint64_t nodeId = addNode(node);
-
-                                mEdges.insert(SyncEdge(stageNodeId, nodeId));
-                                mEdges.insert(SyncEdge(nodeId, stageNodeId));
-
                                 if (binding.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER)
                                 {
                                     node.type = SyncNode::MEM_WRITE;
                                     node.accesses = VK_ACCESS_SHADER_WRITE_BIT;
-                                    nodeId = addNode(node);
-                                    mEdges.insert(SyncEdge(stageNodeId, nodeId));
-                                    mEdges.insert(SyncEdge(nodeId, stageNodeId));
+                                    memNodes[stage].push_back(node);
                                 }
                             }
 
@@ -1055,32 +1105,20 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
 
                             // XXX: handle pDynamicOffsets
 
-                            SyncNode stageNode;
-                            stageNode.commandId = commandId;
-                            stageNode.type = SyncNode::ACTION_CMD_STAGE;
-
                             for (auto stage : pipelineStages)
                             {
-                                node.stages = stageNode.stages = stage;
+                                node.stages = stage;
 
                                 // XXX: handle the access types properly
 
                                 node.type = SyncNode::MEM_READ;
                                 node.accesses = VK_ACCESS_SHADER_READ_BIT;
 
-                                uint64_t stageNodeId = addNode(stageNode);
-                                uint64_t nodeId = addNode(node);
-
-                                mEdges.insert(SyncEdge(stageNodeId, nodeId));
-                                mEdges.insert(SyncEdge(nodeId, stageNodeId));
-
                                 if (binding.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER || binding.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC)
                                 {
                                     node.type = SyncNode::MEM_WRITE;
                                     node.accesses = VK_ACCESS_SHADER_WRITE_BIT;
-                                    nodeId = addNode(node);
-                                    mEdges.insert(SyncEdge(stageNodeId, nodeId));
-                                    mEdges.insert(SyncEdge(nodeId, stageNodeId));
+                                    memNodes[stage].push_back(node);
                                 }
                             }
 
@@ -1097,6 +1135,98 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
 
                 ++setIdx;
             }
+
+
+            {
+                SyncNode topNode, inNode, outNode, bottomNode;
+                topNode.type = inNode.type = SyncNode::ACTION_CMD_STAGE_IN;
+                outNode.type = bottomNode.type = SyncNode::ACTION_CMD_STAGE_OUT;
+                topNode.commandId = inNode.commandId = outNode.commandId = bottomNode.commandId = commandId;
+
+                topNode.stages = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+                bottomNode.stages = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+
+                uint64_t topNodeId = addNode(topNode);
+
+                std::vector<uint64_t> outNodeIds;
+                for (VkPipelineStageFlagBits stage : {
+                    VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+                    VK_PIPELINE_STAGE_VERTEX_INPUT_BIT,
+                    VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+                    VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT,
+                    VK_PIPELINE_STAGE_TESSELLATION_EVALUATION_SHADER_BIT,
+                    VK_PIPELINE_STAGE_GEOMETRY_SHADER_BIT,
+                    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                    VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+                    VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                })
+                {
+                    inNode.stages = outNode.stages = stage;
+                    uint64_t inNodeId = addNode(inNode);
+
+                    mEdges.insert(SyncEdge(topNodeId, inNodeId));
+
+                    std::vector<uint64_t> memNodeIds;
+                    for (SyncNode &memNode : memNodes[stage])
+                        memNodeIds.push_back(addNode(memNode));
+
+                    uint64_t outNodeId = addNode(inNode);
+                    outNodeIds.push_back(outNodeId);
+
+                    for (uint64_t memNodeId : memNodeIds)
+                    {
+                        mEdges.insert(SyncEdge(inNodeId, memNodeId));
+                        mEdges.insert(SyncEdge(memNodeId, outNodeId));
+                    }
+                }
+
+                uint64_t bottomNodeId = addNode(bottomNode);
+                for (uint64_t outNodeId : outNodeIds)
+                    mEdges.insert(SyncEdge(outNodeId, bottomNodeId));
+            }
+
+//             {
+//                 SyncNode topNode, n2, bottomNode;
+//                 topNode.type = SyncNode::ACTION_CMD_TOP_STAGE;
+//                 topNode.commandId = n2.commandId = bottomNode.commandId = commandId;
+//                 topNode.stages = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+//                 bottomNode.stages = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+// 
+//                 uint64_t id1 = addNode(topNode);
+// 
+//                 std::vector<uint64_t> id2s;
+// 
+//                 for (VkPipelineStageFlagBits stage : {
+//                     VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+//                         VK_PIPELINE_STAGE_VERTEX_INPUT_BIT,
+//                         VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+//                         VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT,
+//                         VK_PIPELINE_STAGE_TESSELLATION_EVALUATION_SHADER_BIT,
+//                         VK_PIPELINE_STAGE_GEOMETRY_SHADER_BIT,
+//                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+//                         VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+//                         VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+//                         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+//                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+//                         VK_PIPELINE_STAGE_TRANSFER_BIT,
+//                 })
+//                 {
+//                     n2.stages = stage;
+//                     id2s.push_back(addNode(n2));
+//                 }
+// 
+//                     uint64_t id3 = addNode(bottomNode);
+// 
+//                     for (uint64_t id2 : id2s)
+//                     {
+//                         mEdges.insert(SyncEdge(id1, id2));
+//                         mEdges.insert(SyncEdge(id2, id3));
+//                     }
+//             }
+
 
             if (LOG_INFO(COMMAND_BUFFER, buf.command_buffer, SYNC_MSG_NONE,
                 "%s", str.str().c_str()))
@@ -1128,6 +1258,14 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
     // * READ-after-WRITE without a FLUSH and INVALIDATE in between
     // ...
     // (NOTE: in theory should apply to each byte(/line) of the accesses)
+
+    // For flush/invalidate:
+    // Walk backwards from the read/write, with a state machine (per byte)
+    //  "Needs invalidating for $stage/$access"
+    //  -> "Invalidated, not flushed"
+    //  -> "Invalidated, flushed for [$s1/$a1, $s2/$a2, ...]"
+    //  -> "Written by $s1/$a2"
+    // where any writes apart from in the final state are illegal RAW/WAW
 
     for (auto &it1 = mNodesById.begin(); it1 != mNodesById.end(); ++it1)
     {
@@ -1220,7 +1358,7 @@ bool SyncValidator::findPath(uint64_t srcNodeId, uint64_t dstNodeId)
             }
         }
 
-        if (curNode.type == SyncNode::ACTION_CMD_STAGE || curNode.type == SyncNode::SYNC_CMD_DST_STAGE)
+        if (curNode.type == SyncNode::ACTION_CMD_STAGE_OUT || curNode.type == SyncNode::SYNC_CMD_DST_STAGE)
         {
             for (auto &edgeSet : mPrecedingEdges)
             {
@@ -1229,6 +1367,7 @@ bool SyncValidator::findPath(uint64_t srcNodeId, uint64_t dstNodeId)
                         edgeSet.commandBound.subpassId == curNode.commandId.subpassId) &&
                     curNode.commandId.sequenceId < edgeSet.commandBound.sequenceId)
                 {
+                    assert(curNodeId < edgeSet.sync);
                     SyncNode syncNode = mNodesById[edgeSet.sync];
                     if ((curNode.stages & syncNode.stages) != 0)
                     {
@@ -1251,7 +1390,8 @@ bool SyncValidator::findPath(uint64_t srcNodeId, uint64_t dstNodeId)
                                 edgeSet.commandBound.subpassId == otherNode.second.commandId.subpassId) &&
                             edgeSet.commandBound.sequenceId < otherNode.second.commandId.sequenceId)
                         {
-                            if (otherNode.second.type == SyncNode::ACTION_CMD_STAGE || otherNode.second.type == SyncNode::SYNC_CMD_SRC_STAGE)
+                            assert(edgeSet.sync < curNodeId);
+                            if (otherNode.second.type == SyncNode::ACTION_CMD_STAGE_IN || otherNode.second.type == SyncNode::SYNC_CMD_SRC_STAGE)
                             {
                                 if ((curNode.stages & otherNode.second.stages) != 0)
                                 {
