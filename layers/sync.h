@@ -796,8 +796,8 @@ struct SyncNode
     ENodeType type;
 
     CommandId commandId;
-    VkPipelineStageFlags stages;
-    VkAccessFlags accesses;
+    VkPipelineStageFlags stages; // if MEM_WRITE/READ then only one stage;  if FLUSH/INVALIDATE then multiple
+    VkAccessFlags accesses;      // if MEM_WRITE/READ then only one access; if FLUSH/INVALIDATE then multiple
     MemRegion memory;
 
     SyncNode();
@@ -805,13 +805,15 @@ struct SyncNode
     void to_string(std::ostream &str) const;
 };
 
+typedef uint64_t NodeId;
+
 struct SyncEdge
 {
     // Node IDs
-    uint64_t a;
-    uint64_t b;
+    NodeId a;
+    NodeId b;
 
-    SyncEdge(uint64_t a, uint64_t b) : a(a), b(b)
+    SyncEdge(NodeId a, NodeId b) : a(a), b(b)
     {
         assert(a < b);
     }
@@ -822,7 +824,7 @@ struct SyncEdge
 struct SyncEdgeSet
 {
     // Node ID of sync command node
-    uint64_t sync;
+    NodeId sync;
 
     // Exclusive upper/lower bound of set of commands
     CommandId commandBound;
@@ -834,6 +836,40 @@ struct SyncEdgeSet
     }
 
     bool operator<(const SyncEdgeSet &e) const;
+};
+
+struct SyncCacheState
+{
+    struct StageAccess
+    {
+        VkPipelineStageFlagBits stage;
+        VkAccessFlagBits access;
+
+        bool operator<(const StageAccess &sa) const
+        {
+            if (stage < sa.stage)
+                return true;
+            if (sa.stage < stage)
+                return false;
+            return access < sa.access;
+        }
+
+    };
+
+    enum EType
+    {
+        UNINITIALIZED,
+        DIRTY,
+        CLEAN,
+    };
+
+    MemRegion memory;
+    EType type;
+    NodeId writer;
+    StageAccess dirty;
+    std::set<StageAccess> invalidated;
+
+    void to_string(std::ostream &str);
 };
 
 class SyncValidator
@@ -849,17 +885,27 @@ private:
 
     CommandId mNextCommandId;
     uint64_t mNextSubpassId;
-    uint64_t mNextNodeId;
+    NodeId mNextNodeId;
 
     std::map<SyncNode, uint64_t> mNodeIds;
-    std::map<uint64_t, SyncNode> mNodesById;
+    std::map<NodeId, SyncNode> mNodesById;
     std::set<SyncEdge> mEdges;
+
+    // For each e in mPrecedingEdges, there is an edge
+    // from every ACTION_CMD_STAGE_OUT/SYNC_CMD_DST_STAGE node that precedes e.commandBound
+    // to the SYNC_CMD_SRC_STAGE node e.sync
     std::set<SyncEdgeSet> mPrecedingEdges;
+
+    // For each e in mFollowingEdges, there is an edge
+    // from the SYNC_CMD_DST_STAGE node e.sync
+    // to every ACTION_CMD_STAGE_IN/SYNC_CMD_SRC_STAGE node that follows e.commandBound
     std::set<SyncEdgeSet> mFollowingEdges;
 
-    uint64_t addNode(const SyncNode &node);
+    NodeId addNode(const SyncNode &node);
 
-    bool findPath(uint64_t srcNodeId, uint64_t dstNodeId);
+    bool findPath(NodeId srcNodeId, NodeId dstNodeId);
+
+    std::vector<NodeId> findPredecessors(NodeId nodeId);
 };
 
 #endif // INCLUDED_VULKAN_SYNC_H

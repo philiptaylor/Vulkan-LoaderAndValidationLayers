@@ -147,6 +147,105 @@ void MemRegion::to_string(std::ostream &str) const
     str << " }";
 }
 
+static const VkPipelineStageFlagBits VIRTUAL_PIPELINE_STAGE_TRANSITION_BIT = (VkPipelineStageFlagBits)0x10000000;
+static const VkAccessFlagBits VIRTUAL_ACCESS_TRANSITION_BIT = (VkAccessFlagBits)0x10000000;
+
+static void stage_to_string(std::ostream &str, VkPipelineStageFlagBits stage)
+{
+    switch (stage)
+    {
+#define X(n) case VK_PIPELINE_STAGE_##n##_BIT: str << #n; break;
+    X(TOP_OF_PIPE);
+    X(DRAW_INDIRECT);
+    X(VERTEX_INPUT);
+    X(VERTEX_SHADER);
+    X(TESSELLATION_CONTROL_SHADER);
+    X(TESSELLATION_EVALUATION_SHADER);
+    X(GEOMETRY_SHADER);
+    X(FRAGMENT_SHADER);
+    X(EARLY_FRAGMENT_TESTS);
+    X(LATE_FRAGMENT_TESTS);
+    X(COLOR_ATTACHMENT_OUTPUT);
+    X(COMPUTE_SHADER);
+    X(TRANSFER);
+    X(BOTTOM_OF_PIPE);
+    X(HOST);
+#undef X
+    case VIRTUAL_PIPELINE_STAGE_TRANSITION_BIT: str << "TRANSITION"; break;
+    default: str << std::hex << stage << std::dec; break;
+    }
+}
+
+static void access_to_string(std::ostream &str, VkAccessFlagBits access)
+{
+    switch (access)
+    {
+#define X(n) case VK_ACCESS_##n##_BIT: str << #n; break;
+    X(INDIRECT_COMMAND_READ);
+    X(INDEX_READ);
+    X(VERTEX_ATTRIBUTE_READ);
+    X(UNIFORM_READ);
+    X(INPUT_ATTACHMENT_READ);
+    X(SHADER_READ);
+    X(SHADER_WRITE);
+    X(COLOR_ATTACHMENT_READ);
+    X(COLOR_ATTACHMENT_WRITE);
+    X(DEPTH_STENCIL_ATTACHMENT_READ);
+    X(DEPTH_STENCIL_ATTACHMENT_WRITE);
+    X(TRANSFER_READ);
+    X(TRANSFER_WRITE);
+    X(HOST_READ);
+    X(HOST_WRITE);
+    X(MEMORY_READ);
+    X(MEMORY_WRITE);
+#undef X
+    case VIRTUAL_ACCESS_TRANSITION_BIT: str << "TRANSITION"; break;
+    default: str << std::hex << access << std::dec; break;
+    }
+}
+
+void SyncCacheState::to_string(std::ostream &str)
+{
+    str << "{";
+
+    switch (type)
+    {
+    case UNINITIALIZED:
+        str << " UNINITIALIZED";
+        break;
+    case DIRTY:
+        str << " DIRTY";
+        break;
+    case CLEAN:
+        str << " CLEAN";
+        break;
+    }
+    
+    str << " memory=";
+    memory.to_string(str);
+
+    str << " writer=" << writer;
+    str << " dirty={ ";
+    stage_to_string(str, dirty.stage);
+    str << " ";
+    access_to_string(str, dirty.access);
+    str << " }";
+
+    str << " invalidated=[";
+
+    for (auto &sa : invalidated)
+    {
+        str << " { ";
+        stage_to_string(str, sa.stage);
+        str << " ";
+        access_to_string(str, sa.access);
+        str << " }";
+    }
+
+    str << " ]";
+    str << " }";
+}
+
 static bool findSubresourceRangeOverlap(const VkImageSubresourceRange &a, const VkImageSubresourceRange &b, VkImageSubresourceRange &overlap)
 {
     if ((a.aspectMask & b.aspectMask) == 0)
@@ -169,6 +268,80 @@ static bool findSubresourceRangeOverlap(const VkImageSubresourceRange &a, const 
 
     overlap.baseArrayLayer = std::max(a.baseArrayLayer, b.baseArrayLayer);
     overlap.layerCount = std::min(a.baseArrayLayer + a.layerCount, b.baseArrayLayer + b.layerCount) - overlap.baseArrayLayer;
+
+    return true;
+}
+
+static bool findSubresourceRangeOverlap2(const VkImageSubresourceRange &a, const VkImageSubresourceRange &b,
+    VkImageSubresourceRange &overlap, std::vector<VkImageSubresourceRange> &diffs)
+{
+    if ((a.aspectMask & b.aspectMask) == 0)
+        return false;
+
+    overlap.aspectMask = a.aspectMask & b.aspectMask;
+
+    if (a.aspectMask & ~b.aspectMask)
+    {
+        VkImageSubresourceRange diff = a;
+        diff.aspectMask &= ~b.aspectMask;
+        diffs.push_back(diff);
+    }
+
+    if (a.baseMipLevel + a.levelCount <= b.baseMipLevel)
+        return false;
+    if (b.baseMipLevel + b.levelCount <= a.baseMipLevel)
+        return false;
+
+    overlap.baseMipLevel = std::max(a.baseMipLevel, b.baseMipLevel);
+    overlap.levelCount = std::min(a.baseMipLevel + a.levelCount, b.baseMipLevel + b.levelCount) - overlap.baseMipLevel;
+
+    if (a.baseMipLevel < overlap.baseMipLevel)
+    {
+        VkImageSubresourceRange diff = a;
+        diff.aspectMask = overlap.aspectMask;
+        diff.baseMipLevel = a.baseMipLevel;
+        diff.levelCount = overlap.baseMipLevel - a.baseMipLevel;
+        diffs.push_back(diff);
+    }
+
+    if (a.baseMipLevel + a.levelCount > overlap.baseMipLevel + overlap.levelCount)
+    {
+        VkImageSubresourceRange diff = a;
+        diff.aspectMask = overlap.aspectMask;
+        diff.baseMipLevel = overlap.baseMipLevel + overlap.levelCount;
+        diff.levelCount = a.baseMipLevel + a.levelCount - diff.baseMipLevel;
+        diffs.push_back(diff);
+    }
+
+    if (a.baseArrayLayer + a.layerCount <= b.baseArrayLayer)
+        return false;
+    if (b.baseArrayLayer + b.layerCount <= a.baseArrayLayer)
+        return false;
+
+    overlap.baseArrayLayer = std::max(a.baseArrayLayer, b.baseArrayLayer);
+    overlap.layerCount = std::min(a.baseArrayLayer + a.layerCount, b.baseArrayLayer + b.layerCount) - overlap.baseArrayLayer;
+
+    if (a.baseArrayLayer < overlap.baseArrayLayer)
+    {
+        VkImageSubresourceRange diff = a;
+        diff.aspectMask = overlap.aspectMask;
+        diff.baseMipLevel = overlap.baseMipLevel;
+        diff.levelCount = overlap.levelCount;
+        diff.baseArrayLayer = a.baseArrayLayer;
+        diff.layerCount = overlap.baseArrayLayer - a.baseArrayLayer;
+        diffs.push_back(diff);
+    }
+
+    if (a.baseArrayLayer + a.layerCount > overlap.baseArrayLayer + overlap.layerCount)
+    {
+        VkImageSubresourceRange diff = a;
+        diff.aspectMask = overlap.aspectMask;
+        diff.baseMipLevel = overlap.baseMipLevel;
+        diff.levelCount = overlap.levelCount;
+        diff.baseArrayLayer = overlap.baseArrayLayer + overlap.layerCount;
+        diff.layerCount = a.baseArrayLayer + a.layerCount - diff.baseArrayLayer;
+        diffs.push_back(diff);
+    }
 
     return true;
 }
@@ -220,8 +393,72 @@ static bool findMemRegionOverlap(const MemRegion &a, const MemRegion &b, MemRegi
     return false;
 }
 
-static const VkPipelineStageFlagBits VIRTUAL_PIPELINE_STAGE_TRANSITION_BIT = (VkPipelineStageFlagBits)0x10000000;
-static const VkAccessFlagBits VIRTUAL_ACCESS_TRANSITION_BIT = (VkAccessFlagBits)0x10000000;
+// Returns (a intersect b), (a - b)
+static bool findMemRegionOverlap2(const MemRegion &a, const MemRegion &b,
+    std::vector<MemRegion> &isct, std::vector<MemRegion> &diff)
+{
+    // Global overlaps with anything
+    if (a.type == MemRegion::GLOBAL)
+    {
+        assert(0); // can't do diffs this way
+        isct.push_back(b);
+        return true;
+    }
+    if (b.type == MemRegion::GLOBAL)
+    {
+        isct.push_back(a);
+        return true;
+    }
+
+    // Swapchain images can't be aliased, so we just need to check identity
+    if (a.type == MemRegion::SWAPCHAIN_IMAGE && b.type == MemRegion::SWAPCHAIN_IMAGE)
+    {
+        if (a.image != b.image)
+        {
+            diff.push_back(a);
+            return false;
+        }
+        MemRegion overlap = a;
+        std::vector<VkImageSubresourceRange> rangeDiffs;
+        if (findSubresourceRangeOverlap2(a.imageSubresourceRange, b.imageSubresourceRange, overlap.imageSubresourceRange, rangeDiffs))
+            isct.push_back(overlap);
+
+        for (auto &d : rangeDiffs)
+        {
+            MemRegion regionDiff = a;
+            regionDiff.imageSubresourceRange = d;
+            diff.push_back(regionDiff);
+        }
+        return !isct.empty();
+    }
+
+    if (a.type == MemRegion::IMAGE && b.type == MemRegion::IMAGE)
+    {
+        if (a.image != b.image)
+        {
+            diff.push_back(a);
+            return false;
+        }
+        MemRegion overlap = a;
+        std::vector<VkImageSubresourceRange> rangeDiffs;
+        if (findSubresourceRangeOverlap2(a.imageSubresourceRange, b.imageSubresourceRange, overlap.imageSubresourceRange, rangeDiffs))
+            isct.push_back(overlap);
+
+        for (auto &d : rangeDiffs)
+        {
+            MemRegion regionDiff = a;
+            regionDiff.imageSubresourceRange = d;
+            diff.push_back(regionDiff);
+        }
+        return !isct.empty();
+
+        // XXX: handle IMAGE aliasing
+    }
+
+    // TODO: handle BUFFER
+
+    return false;
+}
 
 SyncNode::SyncNode() : type(INVALID), stages(0), accesses(0)
 {
@@ -285,28 +522,8 @@ void SyncNode::to_string(std::ostream &str) const
         {
             if (stages & stage)
             {
-                switch (stage)
-                {
-#define X(n) case VK_PIPELINE_STAGE_##n##_BIT: str << " " #n; break;
-                X(TOP_OF_PIPE);
-                X(DRAW_INDIRECT);
-                X(VERTEX_INPUT);
-                X(VERTEX_SHADER);
-                X(TESSELLATION_CONTROL_SHADER);
-                X(TESSELLATION_EVALUATION_SHADER);
-                X(GEOMETRY_SHADER);
-                X(FRAGMENT_SHADER);
-                X(EARLY_FRAGMENT_TESTS);
-                X(LATE_FRAGMENT_TESTS);
-                X(COLOR_ATTACHMENT_OUTPUT);
-                X(COMPUTE_SHADER);
-                X(TRANSFER);
-                X(BOTTOM_OF_PIPE);
-                X(HOST);
-#undef X
-                case VIRTUAL_PIPELINE_STAGE_TRANSITION_BIT: str << " TRANSITION"; break;
-                default: str << " " << std::hex << stage << std::dec; break;
-                }
+                str << " ";
+                stage_to_string(str, (VkPipelineStageFlagBits)stage);
             }
         }
 
@@ -328,30 +545,8 @@ void SyncNode::to_string(std::ostream &str) const
         {
             if (accesses & access)
             {
-                switch (access)
-                {
-#define X(n) case VK_ACCESS_##n##_BIT: str << " " #n; break;
-                X(INDIRECT_COMMAND_READ);
-                X(INDEX_READ);
-                X(VERTEX_ATTRIBUTE_READ);
-                X(UNIFORM_READ);
-                X(INPUT_ATTACHMENT_READ);
-                X(SHADER_READ);
-                X(SHADER_WRITE);
-                X(COLOR_ATTACHMENT_READ);
-                X(COLOR_ATTACHMENT_WRITE);
-                X(DEPTH_STENCIL_ATTACHMENT_READ);
-                X(DEPTH_STENCIL_ATTACHMENT_WRITE);
-                X(TRANSFER_READ);
-                X(TRANSFER_WRITE);
-                X(HOST_READ);
-                X(HOST_WRITE);
-                X(MEMORY_READ);
-                X(MEMORY_WRITE);
-#undef X
-                case VIRTUAL_ACCESS_TRANSITION_BIT: str << " TRANSITION"; break;
-                default: str << " " << std::hex << access << std::dec; break;
-                }
+                str << " ";
+                access_to_string(str, (VkAccessFlagBits)access);
             }
         }
 
@@ -913,6 +1108,7 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
 
                                 node.type = SyncNode::MEM_READ;
                                 node.accesses = VK_ACCESS_SHADER_READ_BIT;
+                                memNodes[stage].push_back(node);
 
                                 if (binding.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
                                 {
@@ -992,6 +1188,7 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
 
                                 node.type = SyncNode::MEM_READ;
                                 node.accesses = VK_ACCESS_SHADER_READ_BIT;
+                                memNodes[stage].push_back(node);
 
                                 if (binding.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER)
                                 {
@@ -1067,6 +1264,7 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
 
                                 node.type = SyncNode::MEM_READ;
                                 node.accesses = VK_ACCESS_SHADER_READ_BIT;
+                                memNodes[stage].push_back(node);
 
                                 if (binding.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER || binding.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC)
                                 {
@@ -1127,7 +1325,7 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
                     for (SyncNode &memNode : memNodes[stage])
                         memNodeIds.push_back(addNode(memNode));
 
-                    uint64_t outNodeId = addNode(inNode);
+                    uint64_t outNodeId = addNode(outNode);
                     outNodeIds.push_back(outNodeId);
 
                     for (uint64_t memNodeId : memNodeIds)
@@ -1166,20 +1364,6 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
         if (LOG_INFO(QUEUE, queue, SYNC_MSG_NONE, "Edge:\n%s", str.str().c_str()))
             return true;
     }
-
-    // Look for memory violations:
-    // * READ-after-WRITE, WRITE-after-WRITE to overlapping memory without execution dependency
-    // * READ-after-WRITE without a FLUSH and INVALIDATE in between
-    // ...
-    // (NOTE: in theory should apply to each byte(/line) of the accesses)
-
-    // For flush/invalidate:
-    // Walk backwards from the read/write, with a state machine (per byte)
-    //  "Needs invalidating for $stage/$access"
-    //  -> "Invalidated, not flushed"
-    //  -> "Invalidated, flushed for [$s1/$a1, $s2/$a2, ...]"
-    //  -> "Written by $s1/$a2"
-    // where any writes apart from in the final state are illegal RAW/WAW
 
     for (auto &it1 = mNodesById.begin(); it1 != mNodesById.end(); ++it1)
     {
@@ -1225,6 +1409,385 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
         }
     }
 
+    // Each byte has state:
+    //   (C) clean, not written
+    //   (D) written by W1, dirty in S+A
+    //   (F) written by W1, clean, invalidated in []
+    //   (I) written by W1, clean, invalidated in [S1+A1, S2+A2, ...]
+    // 
+    // On write:
+    //   C -> D
+    //   D -> error (write while dirty)
+    //   F -> error (write before invalidate/make-visible)
+    //   I -> error if not invalidated in the right S+A; otherwise D (need to update marker of who last wrote it)
+    // On read:
+    //   C -> okay
+    //   D,F -> error
+    //   I -> error if not invalidated in the right S+A; otherwise ok
+    // On flush:
+    //   C -> C
+    //   D -> F if the S+A match
+    //   F -> F
+    //   I -> I
+    // On invalidate:
+    //   C -> C
+    //   D -> D
+    //   F -> I
+    //   I -> I
+    // 
+    // Each node needs to merge the states of its predecessors
+    // If there are two different Ws: error, concurrent writes to overlapping memory
+    // If they are the same: clean supersedes dirty, invalidated supersedes not
+
+    {
+        std::map<NodeId, std::vector<SyncCacheState>> cacheStates;
+
+        for (auto &it : mNodesById)
+        {
+            NodeId nodeId = it.first;
+            const SyncNode &node = it.second;
+
+            std::vector<NodeId> preds = findPredecessors(nodeId);
+
+            // Merge the states from all predecessors
+            std::vector<SyncCacheState> mergedCacheStates;
+
+            for (NodeId pred : preds)
+            {
+                for (auto &predState : cacheStates[pred])
+                {
+                    std::vector<SyncCacheState> appendedCacheStates;
+
+                    // XXX: this is implemented all wrong
+                    // 
+                    // If predState overlaps with one of our existing merged states,
+                    // we need split the merged state into intersection/diff and update
+                    // them separately. Any part of predState that doesn't overlap any
+                    // existing merged state then gets added unchanged.
+
+                    bool added = false;
+                    for (auto &currState : mergedCacheStates)
+                    {
+                        std::vector<MemRegion> iscts;
+                        std::vector<MemRegion> iscts2; // XXX
+                        std::vector<MemRegion> diffs1;
+                        std::vector<MemRegion> diffs2;
+                        if (findMemRegionOverlap2(predState.memory, currState.memory, iscts, diffs1))
+                        {
+                            added = true;
+
+                            if (predState.writer != currState.writer)
+                            {
+                                if (LOG_ERROR(QUEUE, queue, SYNC_MSG_NONE, "Race between writes"))
+                                    return true;
+                            }
+                            findMemRegionOverlap2(predState.memory, currState.memory, iscts2, diffs2);
+
+                            for (auto &r : iscts)
+                            {
+                                SyncCacheState state;
+                                state.memory = r;
+                                state.writer = currState.writer;
+                                if (predState.type == SyncCacheState::CLEAN || currState.type == SyncCacheState::CLEAN)
+                                {
+                                    state.type = SyncCacheState::CLEAN;
+                                    state.dirty.stage = (VkPipelineStageFlagBits)0;
+                                    state.dirty.access = (VkAccessFlagBits)0;
+                                    state.invalidated = currState.invalidated;
+                                    for (auto sa : predState.invalidated)
+                                        state.invalidated.insert(sa);
+                                }
+                                else
+                                {
+                                    state.type = SyncCacheState::DIRTY;
+                                    assert(predState.dirty.stage == currState.dirty.stage);
+                                    assert(predState.dirty.access == currState.dirty.access);
+                                    state.dirty = currState.dirty;
+                                }
+                                appendedCacheStates.push_back(state);
+                            }
+                            for (auto &r : diffs1)
+                            {
+                                SyncCacheState state = predState;
+                                state.memory = r;
+                                appendedCacheStates.push_back(state);
+                            }
+                            for (auto &r : diffs2)
+                            {
+                                SyncCacheState state = currState;
+                                state.memory = r;
+                                appendedCacheStates.push_back(state);
+                            }
+                        }
+                        else
+                        {
+                            appendedCacheStates.push_back(currState);
+                        }
+                    }
+
+                    if (!added)
+                    {
+                        appendedCacheStates.push_back(predState);
+                    }
+
+                    mergedCacheStates = appendedCacheStates;
+                    //mergedCacheStates.insert(mergedCacheStates.end(), appendedCacheStates.begin(), appendedCacheStates.end());
+                }
+            }
+
+
+            std::vector<SyncCacheState> newCacheStates;
+
+            if (node.type == SyncNode::MEM_WRITE)
+            {
+                bool hasOverlap = false; // XXX
+                for (auto &predState : mergedCacheStates)
+                {
+                    std::vector<MemRegion> iscts;
+                    std::vector<MemRegion> diffs;
+                    if (findMemRegionOverlap2(predState.memory, node.memory, iscts, diffs))
+                    {
+                        if (predState.type == SyncCacheState::DIRTY)
+                        {
+                            std::stringstream str;
+                            str << "Write after write without flushing";
+                            str << "\nAffected memory range: ";
+                            iscts[0].to_string(str);
+                            str << "\nFirst write instruction: ";
+                            mNodesById[predState.writer].to_string(str);
+                            str << "\nSecond write instruction: ";
+                            node.to_string(str);
+                            if (LOG_ERROR(QUEUE, queue, SYNC_MSG_NONE, "%s", str.str().c_str()))
+                                return true;
+
+                            if (LOG_ERROR(QUEUE, queue, SYNC_MSG_NONE, "Write after write without flushing"))
+                                return true;
+                        }
+                        else if (predState.type == SyncCacheState::CLEAN)
+                        {
+                            bool isInvalidated = false;
+                            for (auto &sa : predState.invalidated)
+                            {
+                                if ((sa.stage & node.stages) && (sa.access & node.accesses))
+                                {
+                                    isInvalidated = true;
+                                }
+                            }
+                            if (!isInvalidated && !(node.stages == VIRTUAL_PIPELINE_STAGE_TRANSITION_BIT && node.accesses == VIRTUAL_ACCESS_TRANSITION_BIT))
+                            {
+                                if (LOG_ERROR(QUEUE, queue, SYNC_MSG_NONE, "Write after write without invalidating"))
+                                    return true;
+                            }
+                        }
+                        for (auto &r : iscts)
+                        {
+                            SyncCacheState newState;
+                            newState.memory = r;
+                            newState.writer = nodeId;
+                            if (node.stages == VIRTUAL_PIPELINE_STAGE_TRANSITION_BIT && node.accesses == VIRTUAL_ACCESS_TRANSITION_BIT)
+                            {
+                                newState.type = SyncCacheState::CLEAN;
+                                newState.dirty.stage = (VkPipelineStageFlagBits)0;
+                                newState.dirty.access = (VkAccessFlagBits)0;
+                            }
+                            else
+                            {
+                                newState.type = SyncCacheState::DIRTY;
+                                newState.dirty.stage = (VkPipelineStageFlagBits)node.stages;
+                                newState.dirty.access = (VkAccessFlagBits)node.accesses;
+                            }
+                            newCacheStates.push_back(newState);
+                        }
+                        for (auto &r : diffs)
+                        {
+                            SyncCacheState newState = predState;
+                            newState.memory = r;
+                            newCacheStates.push_back(newState);
+                        }
+
+                        hasOverlap = true;
+                    }
+                    else
+                    {
+                        newCacheStates.push_back(predState);
+                    }
+                }
+                if (!hasOverlap)
+                {
+                    SyncCacheState newState;
+                    newState.memory = node.memory;
+                    newState.writer = nodeId;
+                    if (node.stages == VIRTUAL_PIPELINE_STAGE_TRANSITION_BIT && node.accesses == VIRTUAL_ACCESS_TRANSITION_BIT)
+                    {
+                        newState.type = SyncCacheState::CLEAN;
+                        newState.dirty.stage = (VkPipelineStageFlagBits)0;
+                        newState.dirty.access = (VkAccessFlagBits)0;
+                    }
+                    else
+                    {
+                        newState.type = SyncCacheState::DIRTY;
+                        newState.dirty.stage = (VkPipelineStageFlagBits)node.stages;
+                        newState.dirty.access = (VkAccessFlagBits)node.accesses;
+                    }
+                    newCacheStates = mergedCacheStates;
+                    newCacheStates.push_back(newState);
+                }
+            }
+            else if (node.type == SyncNode::MEM_READ)
+            {
+                for (auto &predState : mergedCacheStates)
+                {
+                    std::vector<MemRegion> iscts;
+                    std::vector<MemRegion> diffs;
+                    if (findMemRegionOverlap2(predState.memory, node.memory, iscts, diffs))
+                    {
+                        if (predState.type == SyncCacheState::DIRTY)
+                        {
+                            if (LOG_ERROR(QUEUE, queue, SYNC_MSG_NONE, "Read after write without flushing"))
+                                return true;
+                        }
+                        else if (predState.type == SyncCacheState::CLEAN)
+                        {
+                            bool isInvalidated = false;
+                            for (auto &sa : predState.invalidated)
+                            {
+                                if ((sa.stage & node.stages) && (sa.access & node.accesses))
+                                {
+                                    isInvalidated = true;
+                                }
+                            }
+                            if (!isInvalidated)
+                            {
+                                std::stringstream str;
+                                str << "Read after write without invalidating";
+                                str << "\nAffected memory range: ";
+                                iscts[0].to_string(str);
+                                str << "\nWrite instruction: ";
+                                mNodesById[predState.writer].to_string(str);
+                                str << "\nRead instruction: ";
+                                node.to_string(str);
+                                str << "\n(This write has only been invalidated for these stageMask/accessMask combinations: [";
+                                for (auto &sa : predState.invalidated)
+                                {
+                                    str << " { ";
+                                    stage_to_string(str, sa.stage);
+                                    str << " ";
+                                    access_to_string(str, sa.access);
+                                    str << " }";
+                                }
+                                str << " ])";
+                                if (LOG_ERROR(QUEUE, queue, SYNC_MSG_NONE, "%s", str.str().c_str()))
+                                    return true;
+
+                                if (LOG_ERROR(QUEUE, queue, SYNC_MSG_NONE, "Read after write without invalidating"))
+                                    return true;
+                            }
+                        }
+                    }
+                    newCacheStates.push_back(predState);
+                }
+            }
+            else if (node.type == SyncNode::MEM_FLUSH)
+            {
+                for (auto &predState : mergedCacheStates)
+                {
+                    std::vector<MemRegion> iscts;
+                    std::vector<MemRegion> diffs;
+                    if (findMemRegionOverlap2(predState.memory, node.memory, iscts, diffs))
+                    {
+                        if (predState.type == SyncCacheState::DIRTY &&
+                            (predState.dirty.stage & node.stages) && (predState.dirty.access & node.accesses))
+                        {
+                            SyncCacheState newState = predState;
+                            newState.type = SyncCacheState::CLEAN;
+                            newState.dirty.stage = (VkPipelineStageFlagBits)0;
+                            newState.dirty.access = (VkAccessFlagBits)0;
+                            newCacheStates.push_back(newState);
+                        }
+                        else
+                        {
+                            newCacheStates.push_back(predState);
+                        }
+                    }
+                    else
+                    {
+                        newCacheStates.push_back(predState);
+                    }
+                }
+            }
+            else if (node.type == SyncNode::MEM_INVALIDATE)
+            {
+                for (auto &predState : mergedCacheStates)
+                {
+                    std::vector<MemRegion> iscts;
+                    std::vector<MemRegion> diffs;
+                    if (findMemRegionOverlap2(predState.memory, node.memory, iscts, diffs))
+                    {
+                        if (predState.type == SyncCacheState::CLEAN)
+                        {
+                            for (auto &r : iscts)
+                            {
+                                SyncCacheState newState = predState;
+                                for (auto stage : EnumIterator<VkPipelineStageFlagBits>(node.stages))
+                                {
+                                    for (auto access : EnumIterator<VkAccessFlagBits>(node.accesses))
+                                    {
+                                        newState.invalidated.insert({ stage, access });
+                                    }
+                                }
+                                newCacheStates.push_back(newState);
+                            }
+                            for (auto &r : diffs)
+                            {
+                                SyncCacheState newState = predState;
+                                newState.memory = r;
+                                newCacheStates.push_back(newState);
+                            }
+                        }
+                        else
+                        {
+                            newCacheStates.push_back(predState);
+                        }
+                    }
+                    else
+                    {
+                        newCacheStates.push_back(predState);
+                    }
+                }
+            }
+            else
+            {
+                newCacheStates = mergedCacheStates;
+            }
+
+            cacheStates[nodeId] = newCacheStates;
+
+            std::stringstream str;
+            str << "Node " << nodeId << ": ";
+            node.to_string(str);
+            str << "\n  Preds:";
+            for (auto p : preds)
+                str << " " << p;
+            str << "\n  Input states:";
+            for (auto &state : mergedCacheStates)
+            {
+                str << "\n    ";
+                state.to_string(str);
+            }
+            str << "\n  Output states:";
+            for (auto &state : newCacheStates)
+            {
+                str << "\n    ";
+                state.to_string(str);
+            }
+
+            if (LOG_INFO(QUEUE, queue, SYNC_MSG_NONE,
+                "%s", str.str().c_str()))
+                return true;
+        }
+    }
+
+
     return false;
 }
 
@@ -1240,6 +1803,7 @@ uint64_t SyncValidator::addNode(const SyncNode &node)
     return id;
 }
 
+// Return true if srcNodeId < dstNodeId
 bool SyncValidator::findPath(uint64_t srcNodeId, uint64_t dstNodeId)
 {
     std::deque<uint64_t> openList;
@@ -1304,7 +1868,7 @@ bool SyncValidator::findPath(uint64_t srcNodeId, uint64_t dstNodeId)
                                 edgeSet.commandBound.subpassId == otherNode.second.commandId.subpassId) &&
                             edgeSet.commandBound.sequenceId < otherNode.second.commandId.sequenceId)
                         {
-                            assert(edgeSet.sync < curNodeId);
+                            assert(edgeSet.sync < otherNode.first);
                             if (otherNode.second.type == SyncNode::ACTION_CMD_STAGE_IN || otherNode.second.type == SyncNode::SYNC_CMD_SRC_STAGE)
                             {
                                 if ((curNode.stages & otherNode.second.stages) != 0)
@@ -1320,4 +1884,101 @@ bool SyncValidator::findPath(uint64_t srcNodeId, uint64_t dstNodeId)
     }
 
     return false;
+}
+
+std::vector<NodeId> SyncValidator::findPredecessors(NodeId curNodeId)
+{
+    std::set<NodeId> preds;
+
+    const SyncNode &curNode = mNodesById[curNodeId];
+
+    // Find every node N such that N < curNode, add them to the open list
+
+    for (auto &edge : mEdges)
+    {
+        if (edge.b == curNodeId)
+        {
+            preds.insert(edge.a);
+        }
+    }
+
+    if (curNode.type == SyncNode::SYNC_CMD_SRC_STAGE)
+    {
+        for (auto &edgeSet : mPrecedingEdges)
+        {
+            if (edgeSet.sync == curNodeId)
+            {
+                for (auto &otherNode : mNodesById)
+                {
+                    if (edgeSet.commandBound.queueId == otherNode.second.commandId.queueId &&
+                        (edgeSet.commandBound.subpassId == CommandId::SUBPASS_NONE ||
+                            edgeSet.commandBound.subpassId == otherNode.second.commandId.subpassId) &&
+                        otherNode.second.commandId.sequenceId < edgeSet.commandBound.sequenceId)
+                    {
+                        assert(otherNode.first < edgeSet.sync);
+                        if (otherNode.second.type == SyncNode::ACTION_CMD_STAGE_OUT || otherNode.second.type == SyncNode::SYNC_CMD_DST_STAGE)
+                        {
+                            if ((curNode.stages & otherNode.second.stages) != 0)
+                            {
+                                preds.insert(otherNode.first);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (curNode.type == SyncNode::ACTION_CMD_STAGE_IN || curNode.type == SyncNode::SYNC_CMD_SRC_STAGE)
+    {
+        for (auto &edgeSet : mFollowingEdges)
+        {
+            if (edgeSet.commandBound.queueId == curNode.commandId.queueId &&
+                (edgeSet.commandBound.subpassId == CommandId::SUBPASS_NONE ||
+                    edgeSet.commandBound.subpassId == curNode.commandId.subpassId) &&
+                edgeSet.commandBound.sequenceId < curNode.commandId.sequenceId)
+            {
+                assert(edgeSet.sync < curNodeId);
+                SyncNode syncNode = mNodesById[edgeSet.sync];
+                if ((curNode.stages & syncNode.stages) != 0)
+                {
+                    preds.insert(edgeSet.sync);
+                }
+            }
+        }
+    }
+
+    // Strip to minimal set:
+    // For A,B: If A=B, push A; if A<B, push B
+
+    std::set<NodeId> directPreds;
+    for (NodeId a : preds)
+    {
+        bool skip = false;
+        for (NodeId b : directPreds)
+        {
+            if (a == b)
+            {
+                skip = true;
+                break;
+            }
+            if (findPath(a, b))
+            {
+                skip = true;
+                break;
+            }
+            if (findPath(b, a))
+            {
+                directPreds.erase(b);
+                break;
+            }
+        }
+        if (!skip)
+            directPreds.insert(a);
+    }
+
+    std::vector<NodeId> ret;
+    for (NodeId a : directPreds)
+        ret.push_back(a);
+    return ret;
 }
