@@ -718,6 +718,7 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
 
             CommandId commandId = mNextCommandId;
             mNextCommandId.sequenceId++;
+            commandId.backtrace = cmd->get_backtrace();
 
             VkPipelineStageFlags normSrcStageMask;
             VkPipelineStageFlags normDstStageMask;
@@ -920,6 +921,7 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
         {
             CommandId commandId = mNextCommandId;
             mNextCommandId.sequenceId++;
+            commandId.backtrace = cmd->get_backtrace();
 
             if (graphicsPipeline == VK_NULL_HANDLE)
             {
@@ -1439,6 +1441,9 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
     // If there are two different Ws: error, concurrent writes to overlapping memory
     // If they are the same: clean supersedes dirty, invalidated supersedes not
 
+    // XXX: states need to include images/buffers that were written, invalidated
+    // XXX: states need to include write confidences, multiple possible-writes
+
     {
         std::map<NodeId, std::vector<SyncCacheState>> cacheStates;
 
@@ -1476,6 +1481,7 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
                         {
                             added = true;
 
+                            // XXX: should compare with <=, pick the later one (or fail if non-comparable)
                             if (predState.writer != currState.writer)
                             {
                                 if (LOG_ERROR(QUEUE, queue, SYNC_MSG_NONE, "Race between writes"))
@@ -1551,11 +1557,11 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
                         {
                             std::stringstream str;
                             str << "Write after write without flushing";
-                            str << "\nAffected memory range: ";
+                            str << "\n  Affected memory range: ";
                             iscts[0].to_string(str);
-                            str << "\nFirst write instruction: ";
+                            str << "\n  First write instruction: ";
                             mNodesById[predState.writer].to_string(str);
-                            str << "\nSecond write instruction: ";
+                            str << "\n  Second write instruction: ";
                             node.to_string(str);
                             if (LOG_ERROR(QUEUE, queue, SYNC_MSG_NONE, "%s", str.str().c_str()))
                                 return true;
@@ -1660,13 +1666,20 @@ bool SyncValidator::submitCmdBuffer(VkQueue queue, const sync_command_buffer& bu
                             {
                                 std::stringstream str;
                                 str << "Read after write without invalidating";
-                                str << "\nAffected memory range: ";
+                                str << "\n  Affected memory range: ";
                                 iscts[0].to_string(str);
-                                str << "\nWrite instruction: ";
+
+                                str << "\n  Write instruction: ";
                                 mNodesById[predState.writer].to_string(str);
-                                str << "\nRead instruction: ";
+                                for (auto line : mNodesById[predState.writer].commandId.backtrace)
+                                    str << "\n    " << line;
+
+                                str << "\n  Read instruction: ";
                                 node.to_string(str);
-                                str << "\n(This write has only been invalidated for these stageMask/accessMask combinations: [";
+                                for (auto line : node.commandId.backtrace)
+                                    str << "\n    " << line;
+
+                                str << "\n  (This write has only been invalidated for these stageMask/accessMask combinations: [";
                                 for (auto &sa : predState.invalidated)
                                 {
                                     str << " { ";

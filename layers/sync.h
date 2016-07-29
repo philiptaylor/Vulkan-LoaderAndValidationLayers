@@ -738,6 +738,9 @@ struct CommandId
     uint64_t subpassId;
     uint64_t sequenceId;
 
+    // XXX
+    std::vector<std::string> backtrace;
+
     CommandId();
     bool operator<(const CommandId &c) const;
 };

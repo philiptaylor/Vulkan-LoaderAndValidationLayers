@@ -2818,7 +2818,13 @@ std::vector<std::string> sync_cmd_base::get_backtrace()
 
         DWORD64 displacement64;
         if (SymFromAddr(GetCurrentProcess(), (intptr_t)mBackTrace[i], &displacement64, symbolInfo))
+        {
+            // Stop before WinMain
+            if (strcmp(symbolInfo->Name, "WinMain") == 0)
+                break;
+
             str << " " << symbolInfo->Name;
+        }
 
         bt.push_back(str.str());
     }

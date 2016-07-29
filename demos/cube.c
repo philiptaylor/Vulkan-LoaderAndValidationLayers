@@ -332,7 +332,7 @@ dbgFunc(
         PrintfMessage("[%s][CALLBACK] %s: %s [flags=0x%x objectType=%d object=0x%llx location=%d messageCode=%d pUserData=%p]\n",
             severity, pLayerPrefix, pMessage, flags, objectType, (unsigned long long)object, location, messageCode, pUserData);
     else
-        PrintfMessage("[%s][CALLBACK] %s: %s\n", severity, pLayerPrefix, pMessage);
+        PrintfMessage("[%s] %s: %s\n", severity, pLayerPrefix, pMessage);
 
 #ifdef _WIN32
     if (flags & VK_DEBUG_REPORT_ERROR_BIT_EXT)
